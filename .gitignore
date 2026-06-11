@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.pyo
+.pyd
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+video/
+*.mp4
+*.avi
+*.mov
+*.mp3
+*.wav
+ai-service/tmp/
+backend/data/*.sqlite
+backend/data/*.db
+
+# Cache
+.cache/
+*.pt
