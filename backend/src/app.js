@@ -1,117 +1,113 @@
 import express from 'express';
 import cors from 'cors';
-import fileUpload from 'express-fileupload';
+import helmet from 'helmet';
+import morgan from 'morgan';
 import dotenv from 'dotenv';
-import jwt from 'jsonwebtoken';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import sequelize from './config/database.js';
-import { errorHandler, authMiddleware } from './middleware/auth.js';
-import { logger } from './utils/helpers.js';
 import { User } from './models/index.js';
-
+import authRoutes from './api/authRoutes.js';
 import videoRoutes from './api/videoRoutes.js';
 import reviewRoutes from './api/reviewRoutes.js';
 import statisticsRoutes from './api/statisticsRoutes.js';
+import auditRoutes from './api/auditRoutes.js';
+import logger from './utils/logger.js';
+import fs from 'fs';
+import path from 'path';
+import fileUpload from 'express-fileupload';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Ensure required directories exist
-const dataDir = path.join(__dirname, 'data');
-const uploadsDir = path.join(__dirname, 'uploads');
-const tmpDir = path.join(__dirname, 'tmp');
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-if (!fs.existsSync(tmpDir)) {
-  fs.mkdirSync(tmpDir, { recursive: true });
-}
-
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-change-in-production';
 
 // Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(fileUpload({
-  limits: { fileSize: 209715200 }, // 200MB
-  useTempFiles: false,
-  tempFileDir: path.join(__dirname, 'tmp'),
-  createParentPath: true,
-  debug: false,
+app.use(helmet());
+app.use(cors({
+  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:3001'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'X-Requested-With'],
 }));
+app.use(morgan('combined'));
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
+app.use(fileUpload({
+  limits: { fileSize: 209715200 },
+  useTempFiles: true,
+  tempFileDir: './tmp/',
+}));
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  logger.info('Created uploads directory');
+}
+
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/videos', videoRoutes);
+app.use('/api/reviews', reviewRoutes);
+app.use('/api/statistics', statisticsRoutes);
+app.use('/api/audit', auditRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Auth endpoint
-app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body;
-  const usernameToUse = username || 'reviewer1';
+// Error handling
+app.use((err, req, res, next) => {
+  logger.error('Error:', err);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
 
+// Database sync and server start
+const initDatabase = async () => {
   try {
-    let user = await User.findOne({ where: { username: usernameToUse } });
-    
-    if (!user) {
-      user = await User.create({
-        username: usernameToUse,
-        email: `${usernameToUse}@demo.com`,
-        password: 'demo-password',
+    // Sync database (don't alter existing tables)
+    await sequelize.sync({ alter: false });
+    logger.info('Database synced successfully');
+
+    // Initialize admin user
+    const bcrypt = await import('bcrypt');
+    const User = (await import('./models/User.js')).default;
+
+    const adminExists = await User.findOne({ where: { username: 'admin' } });
+    if (!adminExists) {
+      const hashedPassword = await bcrypt.hash('admin123', 10);
+      await User.create({
+        username: 'admin',
+        email: 'admin@example.com',
+        password: hashedPassword,
         role: 'admin',
         status: 'active',
       });
-      logger.info(`Created demo user: ${usernameToUse}`);
+      logger.info('Admin user created: admin / admin123');
     }
 
-    const userPayload = {
-      id: user.id,
-      username: user.username,
-      role: user.role,
-    };
+    // Initialize default reviewer if not exists
+    const reviewerExists = await User.findOne({ where: { username: 'reviewer1' } });
+    if (!reviewerExists) {
+      const hashedPassword = await bcrypt.hash('reviewer123', 10);
+      await User.create({
+        username: 'reviewer1',
+        email: 'reviewer1@example.com',
+        password: hashedPassword,
+        role: 'reviewer',
+        status: 'active',
+      });
+      logger.info('Reviewer user created: reviewer1 / reviewer123');
+    }
 
-    const token = jwt.sign(userPayload, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: userPayload });
-  } catch (error) {
-    logger.error('Login error', error);
-    res.status(500).json({ error: 'Login failed' });
-  }
-});
-
-// API Routes
-app.use('/api/videos', videoRoutes);
-app.use('/api/reviews', reviewRoutes);
-app.use('/api/statistics', statisticsRoutes);
-
-// Error handler
-app.use(errorHandler);
-
-// Initialize database and start server
-const startServer = async () => {
-  try {
-    // Sync database schema (only verify structure, don't modify)
-    await sequelize.sync();
-    logger.info('Database synced successfully');
-
-    app.listen(PORT, () => {
+    // Start server
+    app.listen(PORT, '0.0.0.0', () => {
       logger.info(`Server running on port ${PORT}`);
     });
   } catch (error) {
-    logger.error('Failed to start server', error);
+    logger.error('Failed to initialize database:', error);
     process.exit(1);
   }
 };
 
-startServer();
-
-export default app;
+initDatabase();

@@ -55,12 +55,41 @@ class VideoProcessor:
         
         logger.info('VideoProcessor initialized with OpenCV and Kimi API')
     
+    def _open_video_with_chinese_path(self, video_path):
+        try:
+            import numpy as np
+            video_path = os.path.abspath(video_path)
+            cap = cv2.VideoCapture()
+            cap.open(video_path, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                return cap
+            
+            cap.release()
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                return cap
+            
+            cap.release()
+            return None
+        except Exception as e:
+            logger.error(f'Error opening video: {str(e)}')
+            return None
+
     def get_metadata(self, video_path):
         try:
             logger.info(f'Extracting metadata from: {video_path}')
             
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
+            if not os.path.exists(video_path):
+                logger.error(f'Video file does not exist: {video_path}')
+                return None
+            
+            file_size = os.path.getsize(video_path)
+            if file_size == 0:
+                logger.error(f'Video file is empty: {video_path}')
+                return None
+            
+            cap = self._open_video_with_chinese_path(video_path)
+            if not cap:
                 logger.error(f'Cannot open video file: {video_path}')
                 return None
             
@@ -105,8 +134,17 @@ class VideoProcessor:
         try:
             logger.info(f'Extracting keyframes from: {video_path}, interval: {interval}s')
             
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
+            if not os.path.exists(video_path):
+                logger.error(f'Video file does not exist: {video_path}')
+                return []
+            
+            file_size = os.path.getsize(video_path)
+            if file_size == 0:
+                logger.error(f'Video file is empty: {video_path}')
+                return []
+            
+            cap = self._open_video_with_chinese_path(video_path)
+            if not cap:
                 logger.error(f'Cannot open video file: {video_path}')
                 return []
             

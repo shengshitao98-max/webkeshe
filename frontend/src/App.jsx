@@ -14,6 +14,7 @@ import UploadVideo from './pages/UploadVideo';
 import Statistics from './pages/Statistics';
 import AppLayout from './components/AppLayout';
 import { useAuthStore } from './stores';
+import { authAPI } from './services/api';
 import './styles/index.css';
 
 const ProtectedRoute = ({ children }) => {
@@ -63,6 +64,38 @@ const AppContent = () => {
 };
 
 function App() {
+  const { token, setUser } = useAuthStore();
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    const initializeUser = async () => {
+      if (token && !initialized) {
+        try {
+          const response = await authAPI.getMe();
+          if (response.data && response.data.user) {
+            setUser(response.data.user);
+          }
+        } catch (error) {
+          console.error('Failed to fetch user:', error);
+        } finally {
+          setInitialized(true);
+        }
+      } else {
+        setInitialized(true);
+      }
+    };
+
+    initializeUser();
+  }, [token, setUser, initialized]);
+
+  if (!initialized) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-xl text-gray-500">加载中...</div>
+      </div>
+    );
+  }
+
   return (
     <ConfigProvider locale={zhCN}>
       <Router>

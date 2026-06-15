@@ -21,6 +21,11 @@ const AuditResult = sequelize.define('AuditResult', {
     defaultValue: 0,
     comment: 'Risk score from image analysis (0-100)',
   },
+  localRiskScore: {
+    type: DataTypes.FLOAT,
+    defaultValue: 0,
+    comment: 'Risk score from local analysis (0-100)',
+  },
   overallRiskScore: {
     type: DataTypes.FLOAT,
     defaultValue: 0,
@@ -49,6 +54,16 @@ const AuditResult = sequelize.define('AuditResult', {
   summary: {
     type: DataTypes.TEXT,
     comment: 'Video content summary/description',
+  },
+  analysisMethod: {
+    type: DataTypes.ENUM('local_only', 'kimi', 'local_fallback'),
+    defaultValue: 'local_only',
+    comment: 'Method used for analysis: local_only, kimi, or local_fallback',
+  },
+  localThreshold: {
+    type: DataTypes.INTEGER,
+    defaultValue: 30,
+    comment: 'Local analysis threshold used for this video',
   },
   processedAt: {
     type: DataTypes.DATE,

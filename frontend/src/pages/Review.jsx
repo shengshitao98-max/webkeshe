@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Row, Col, Card, Statistic, Table, Tag, Button, Modal, Form, Input, message, Select, Collapse, Space, Tabs } from 'antd';
-import { UploadOutlined, CheckOutlined, CloseOutlined, WarningOutlined, InfoCircleOutlined, BarChartOutlined, FileTextOutlined } from '@ant-design/icons';
+import { Row, Col, Card, Statistic, Table, Tag, Button, Modal, Form, Input, message, Select, Collapse, Space, Tabs, Divider, Switch, InputNumber, Alert } from 'antd';
+import { UploadOutlined, CheckOutlined, CloseOutlined, WarningOutlined, InfoCircleOutlined, BarChartOutlined, FileTextOutlined, SettingOutlined, LockOutlined } from '@ant-design/icons';
 import { videoAPI, reviewAPI } from '../services/api';
-import { useVideoStore } from '../stores';
+import { useAuthStore } from '../stores';
 import { colorMap, riskLevelMap, categoryMap } from '../styles/constants';
 
 const formatDuration = (seconds) => {
@@ -12,6 +12,8 @@ const formatDuration = (seconds) => {
 };
 
 const Dashboard = () => {
+  const { user } = useAuthStore();
+  const isAdmin = user?.role === 'admin';
   const [statistics, setStatistics] = useState(null);
   const [pendingReviews, setPendingReviews] = useState([]);
   const [allVideos, setAllVideos] = useState([]);
@@ -19,11 +21,36 @@ const Dashboard = () => {
   const [reviewModal, setReviewModal] = useState(false);
   const [reviewForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [thresholdSettings, setThresholdSettings] = useState({
+    localThreshold: 30,
+    kimiThreshold: 50,
+    passThreshold: 30,
+    suspiciousThreshold: 70,
+  });
 
   useEffect(() => {
     fetchPendingReviews();
     fetchAllVideos();
+    if (isAdmin) {
+      fetchStatistics();
+    }
   }, []);
+
+  const fetchStatistics = async () => {
+    try {
+      const response = await fetch('/api/statistics/overall', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setStatistics(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch statistics:', error);
+    }
+  };
 
   const fetchPendingReviews = async () => {
     try {
@@ -175,6 +202,70 @@ const Dashboard = () => {
     );
   };
 
+  const userVideoColumns = [
+    {
+      title: '标题',
+      dataIndex: 'title',
+      key: 'title',
+      ellipsis: true,
+    },
+    {
+      title: '上传时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      render: (text) => text ? new Date(text).toLocaleString() : '-',
+    },
+    {
+      title: '审核状态',
+      key: 'status',
+      render: (_, record) => {
+        if (!record.auditResult) return <Tag color="gray">未审核</Tag>;
+        return <Tag color={record.status === 'completed' ? 'green' : 'orange'}>{record.status === 'completed' ? '已审核' : '处理中'}</Tag>;
+      },
+    },
+    {
+      title: 'AI判定',
+      key: 'riskLevel',
+      render: (_, record) => {
+        if (!record.auditResult) return <Tag color="gray">未审核</Tag>;
+        return <Tag color={colorMap[record.auditResult.riskLevel]}>{riskLevelMap[record.auditResult.riskLevel]}</Tag>;
+      },
+    },
+    {
+      title: '复审结果',
+      key: 'reviewStatus',
+      render: (_, record) => {
+        const review = record.reviews?.[0];
+        if (!review) return <Tag color="gray">未复审</Tag>;
+        const reviewMap = {
+          pass: { label: '通过', color: 'green' },
+          violation: { label: '违规', color: 'red' },
+          appeal_pending: { label: '待申诉', color: 'orange' },
+        };
+        const status = reviewMap[review.finalDecision] || { label: review.finalDecision, color: 'gray' };
+        return <Tag color={status.color}>{status.label}</Tag>;
+      },
+    },
+    {
+      title: '操作',
+      key: 'action',
+      render: (_, record) => {
+        if (record.auditResult) {
+          return (
+            <Button
+              type="primary"
+              size="small"
+              onClick={() => handleReviewClick(record.auditResult)}
+            >
+              查看结果
+            </Button>
+          );
+        }
+        return <Tag color="gray">等待审核</Tag>;
+      },
+    },
+  ];
+
   const allVideosColumns = [
     {
       title: '视频ID',
@@ -215,8 +306,34 @@ const Dashboard = () => {
       key: 'riskLevel',
       render: (_, record) => {
         const riskLevel = record.auditResult?.riskLevel;
+        const analysisMethod = record.auditResult?.analysisMethod;
+        const localThreshold = record.auditResult?.localThreshold;
+        
         if (!riskLevel) return <Tag color="gray">未审核</Tag>;
-        return <Tag color={colorMap[riskLevel]}>{riskLevelMap[riskLevel]}</Tag>;
+        
+        const methodLabel = {
+          'local_only': '本地',
+          'kimi': 'AI',
+          'local_fallback': '回退',
+        };
+        
+        const methodColor = {
+          'local_only': 'cyan',
+          'kimi': 'purple',
+          'local_fallback': 'orange',
+        };
+        
+        return (
+          <div className="space-y-1">
+            <Tag color={colorMap[riskLevel]}>{riskLevelMap[riskLevel]}</Tag>
+            {analysisMethod && (
+              <div className="flex items-center gap-1 text-xs text-gray-500">
+                <Tag color={methodColor[analysisMethod]} size="small">{methodLabel[analysisMethod]}</Tag>
+                {localThreshold && <span>阈值:{localThreshold}</span>}
+              </div>
+            )}
+          </div>
+        );
       },
     },
     {
@@ -248,11 +365,44 @@ const Dashboard = () => {
         );
       },
     },
-    {
-      title: '风险分数',
-      key: 'score',
-      render: (_, record) => record.auditResult?.overallRiskScore || '-',
-    },
+    ...(isAdmin ? [
+      {
+        title: '本地评分',
+        key: 'localScore',
+        render: (_, record) => record.auditResult?.localRiskScore || '-',
+      },
+      {
+        title: '文本评分',
+        key: 'textScore',
+        render: (_, record) => record.auditResult?.textRiskScore || '-',
+      },
+      {
+        title: '综合评分',
+        key: 'score',
+        render: (_, record) => {
+          const score = record.auditResult?.overallRiskScore;
+          return score !== null && score !== undefined ? score : '-';
+        },
+      },
+      {
+        title: '阈值',
+        key: 'threshold',
+        render: (_, record) => record.auditResult?.localThreshold || '-',
+      },
+      {
+        title: '分析方式',
+        key: 'method',
+        render: (_, record) => {
+          const method = record.auditResult?.analysisMethod;
+          const methodLabel = {
+            'local_only': '本地',
+            'kimi': 'AI',
+            'local_fallback': '回退',
+          };
+          return methodLabel[method] || method || '-';
+        },
+      },
+    ] : []),
     {
       title: '操作',
       key: 'action',
@@ -274,39 +424,174 @@ const Dashboard = () => {
   ];
 
   return (
-    <div className="p-8 bg-gray-50 min-h-screen">
-      <h1 className="text-3xl font-bold mb-8">复审工作台</h1>
+    <div className="p-8 bg-gradient-to-br from-slate-50 to-blue-50 min-h-screen">
+      {/* 管理员欢迎横幅 */}
+      {isAdmin && (
+        <div className="bg-gradient-to-r from-blue-600 via-cyan-600 to-blue-700 rounded-2xl p-6 mb-8 text-white shadow-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-2xl font-bold mb-2 flex items-center gap-2">
+                <SettingOutlined />
+                欢迎回来，管理员
+              </h2>
+              <p className="text-blue-100">您可以查看所有视频、配置审核阈值、进行复审操作</p>
+            </div>
+            <div className="bg-white/20 rounded-xl px-6 py-4">
+              <div className="text-center">
+                <p className="text-3xl font-bold">{allVideos.length}</p>
+                <p className="text-sm text-blue-100">总视频数</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <h1 className="text-3xl font-bold mb-8 text-slate-800">
+        {isAdmin ? '视频审核管理' : '我的视频审核结果'}
+      </h1>
 
       <Row gutter={16} className="mb-8">
         <Col xs={24} sm={12} md={6}>
-          <Card>
+          <Card className="shadow-md border-cyan-200 bg-gradient-to-br from-white to-cyan-50">
             <Statistic
-              title="待复审数"
+              title={<span className="text-gray-600">待复审数</span>}
               value={pendingReviews.length}
-              prefix={<UploadOutlined />}
+              prefix={<UploadOutlined className="text-orange-500" />}
+              valueStyle={{ color: '#fa8c16' }}
             />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={6}>
-          <Card>
+          <Card className="shadow-md border-blue-200 bg-gradient-to-br from-white to-blue-50">
             <Statistic
-              title="总视频数"
+              title={<span className="text-gray-600">总视频数</span>}
               value={allVideos.length}
-              prefix={<FileTextOutlined />}
+              prefix={<FileTextOutlined className="text-blue-500" />}
+              valueStyle={{ color: '#1890ff' }}
             />
           </Card>
         </Col>
+        {isAdmin && (
+          <>
+            <Col xs={24} sm={12} md={6}>
+              <Card className="shadow-md border-green-200 bg-gradient-to-br from-white to-green-50">
+                <Statistic
+                  title={<span className="text-gray-600">通过数</span>}
+                  value={allVideos.filter(v => v.reviews?.[0]?.finalDecision === 'pass').length}
+                  prefix={<CheckOutlined className="text-green-500" />}
+                  valueStyle={{ color: '#52c41a' }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} sm={12} md={6}>
+              <Card className="shadow-md border-red-200 bg-gradient-to-br from-white to-red-50">
+                <Statistic
+                  title={<span className="text-gray-600">违规数</span>}
+                  value={allVideos.filter(v => v.reviews?.[0]?.finalDecision === 'violation').length}
+                  prefix={<CloseOutlined className="text-red-500" />}
+                  valueStyle={{ color: '#ff4d4f' }}
+                />
+              </Card>
+            </Col>
+          </>
+        )}
       </Row>
 
+      {/* 管理员阈值设置面板 */}
+      {isAdmin && (
+        <Card className="mb-8 shadow-lg border-cyan-200" title={
+          <span className="flex items-center gap-2 text-cyan-700">
+            <SettingOutlined />
+            评分阈值配置
+          </span>
+        }>
+          <Row gutter={24}>
+            <Col xs={24} md={12}>
+              <Form layout="vertical">
+                <Form.Item label="本地分析阈值" extra="超过此分数将调用AI进行深度分析">
+                  <InputNumber
+                    min={0}
+                    max={100}
+                    value={thresholdSettings.localThreshold}
+                    onChange={(value) => setThresholdSettings({ ...thresholdSettings, localThreshold: value })}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+                <Form.Item label="通过阈值" extra="低于此分数直接通过">
+                  <InputNumber
+                    min={0}
+                    max={100}
+                    value={thresholdSettings.passThreshold}
+                    onChange={(value) => setThresholdSettings({ ...thresholdSettings, passThreshold: value })}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Form>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form layout="vertical">
+                <Form.Item label="AI分析阈值" extra="AI深度分析的敏感度">
+                  <InputNumber
+                    min={0}
+                    max={100}
+                    value={thresholdSettings.kimiThreshold}
+                    onChange={(value) => setThresholdSettings({ ...thresholdSettings, kimiThreshold: value })}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+                <Form.Item label="可疑阈值" extra="超过此分数标记为可疑需要人工复审">
+                  <InputNumber
+                    min={0}
+                    max={100}
+                    value={thresholdSettings.suspiciousThreshold}
+                    onChange={(value) => setThresholdSettings({ ...thresholdSettings, suspiciousThreshold: value })}
+                    style={{ width: '100%' }}
+                  />
+                </Form.Item>
+              </Form>
+            </Col>
+          </Row>
+          <Divider />
+          <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+            <h4 className="font-semibold text-blue-800 mb-2 flex items-center gap-2">
+              <InfoCircleOutlined />
+              评分规则说明
+            </h4>
+            <ul className="text-sm text-blue-700 space-y-1">
+              <li>• 本地评分：本地YOLO+肤色检测分析结果（决定是否调用AI）</li>
+              <li>• 文本评分：语音转写敏感词检测结果</li>
+              <li>• AI图像评分 = 本地评分（作为最终评分依据）</li>
+              <li>• 综合评分 = 文本评分 × 0.4 + AI图像评分 × 0.6</li>
+              <li>• 本地评分 &gt;= 30：调用Kimi AI进行深度分析</li>
+              <li>• 分数 &lt; {thresholdSettings.passThreshold}：自动通过</li>
+              <li>• 分数 {thresholdSettings.passThreshold}-{thresholdSettings.suspiciousThreshold}：可疑，需要人工复审</li>
+              <li>• 分数 ≥ {thresholdSettings.suspiciousThreshold}：违规，需要人工复审</li>
+            </ul>
+          </div>
+        </Card>
+      )}
+
+      {/* 非管理员用户提示 */}
+      {!isAdmin && (
+        <Alert
+          message="提示"
+          description="您上传的视频将自动进行AI审核。审核完成后，您可以在这里查看审核结果。"
+          type="info"
+          showIcon
+          icon={<LockOutlined />}
+          className="mb-8"
+        />
+      )}
+
       <Tabs
-        defaultActiveKey="all"
+        defaultActiveKey={isAdmin ? "all" : "my"}
         className="mb-8"
         items={[
-          {
+          ...(isAdmin ? [{
             key: 'all',
             label: '全部视频',
             children: (
-              <Card title="视频总览">
+              <Card title="视频总览" className="shadow-md">
                 <Table
                   columns={allVideosColumns}
                   dataSource={allVideos}
@@ -316,12 +601,31 @@ const Dashboard = () => {
                 />
               </Card>
             ),
-          },
-          {
-            key: 'pending',
-            label: '待复审',
+          }] : [{
+            key: 'my',
+            label: '我的视频',
             children: (
-              <Card title="待复审列表">
+              <Card title="我的视频列表" className="shadow-md">
+                <Table
+                  columns={userVideoColumns}
+                  dataSource={allVideos}
+                  rowKey="id"
+                  pagination={{ pageSize: 10 }}
+                  loading={false}
+                />
+              </Card>
+            ),
+          }]),
+          ...(isAdmin ? [{
+            key: 'pending',
+            label: <span className="flex items-center gap-2">
+              待复审
+              {pendingReviews.length > 0 && (
+                <Tag color="orange">{pendingReviews.length}</Tag>
+              )}
+            </span>,
+            children: (
+              <Card title="待复审列表" className="shadow-md">
                 <Table
                   columns={columns}
                   dataSource={pendingReviews}
@@ -331,12 +635,17 @@ const Dashboard = () => {
                 />
               </Card>
             ),
-          },
+          }] : []),
         ]}
       />
 
       <Modal
-        title="审核详情"
+        title={
+          <span className="flex items-center gap-2">
+            <FileTextOutlined />
+            审核详情
+          </span>
+        }
         open={reviewModal}
         onCancel={() => setReviewModal(false)}
         width={900}
@@ -373,21 +682,28 @@ const Dashboard = () => {
             <Card title="视频预览" variant="outlined">
               <div className="flex justify-center">
                 {selectedReview.videoId ? (
-                  <video
-                    key={selectedReview.videoId}
-                    controls
-                    className="max-w-full max-h-80 rounded-lg shadow-lg"
-                    poster={`/api/videos/thumbnail/${selectedReview.videoId}?token=${localStorage.getItem('token')}`}
-                    onError={(e) => {
-                      console.error('Video poster failed to load');
-                    }}
-                  >
-                    <source
-                      src={`/api/videos/stream/${selectedReview.videoId}?token=${localStorage.getItem('token')}`}
-                      type="video/mp4"
-                    />
-                    您的浏览器不支持视频播放
-                  </video>
+                  <div className="relative max-w-full max-h-80 rounded-lg shadow-lg overflow-hidden bg-gray-900">
+                    <video
+                      key={selectedReview.videoId}
+                      controls
+                      className="w-full h-full object-contain"
+                      poster={`/api/videos/thumbnail/${selectedReview.videoId}?token=${localStorage.getItem('token')}`}
+                      onError={(e) => {
+                        console.error('Video poster failed to load');
+                      }}
+                    >
+                      <source
+                        src={`/api/videos/stream/${selectedReview.videoId}?token=${localStorage.getItem('token')}`}
+                        type="video/mp4"
+                      />
+                      您的浏览器不支持视频播放
+                    </video>
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-gradient-to-br from-gray-800/50 to-transparent">
+                      <svg className="w-24 h-24 text-gray-500" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                    </div>
+                  </div>
                 ) : (
                   <p className="text-gray-400 py-8">无视频预览</p>
                 )}
@@ -416,197 +732,220 @@ const Dashboard = () => {
               </div>
             </Card>
 
-            <Card title="AI 判断依据" variant="outlined" className="bg-gradient-to-r from-blue-50 to-indigo-50">
-              <Collapse
-                defaultActiveKey={['1', '2']}
-                ghost
-                items={[
-                  {
-                    key: '1',
-                    label: <span className="flex items-center gap-2"><BarChartOutlined /> 图像分析判定</span>,
-                    children: (
-                      <div className="space-y-4">
-                        <div className="bg-white rounded-lg p-4">
-                          <p className="text-sm font-medium text-gray-700 mb-3">关键帧检测指标：</p>
-                          {selectedReview.imageClassifications?.length > 0 && (
-                            <div className="space-y-4">
-                              {selectedReview.imageClassifications.slice(0, 3).map((frame, idx) => (
-                                <div key={idx} className="border-t pt-3">
-                                  <p className="text-xs text-gray-500 mb-2">第 {idx + 1} 帧</p>
-                                  <div className="grid grid-cols-2 gap-4">
-                                    {renderMetricBar('皮肤占比', frame.metrics?.skinPercentage || 0, 100, 30, 45)}
-                                {renderMetricBar('红色区域', frame.metrics?.bloodPercentage || 0, 100, 5, 15)}
-                              </div>
-                              <div className="grid grid-cols-2 gap-4 mt-2">
-                                {renderMetricBar('模糊度', frame.metrics?.blurScore || 0, 100, 50, 70)}
-                                {renderMetricBar('色彩饱和度', frame.metrics?.colorSaturation || 0, 100, 85, 95)}
-                              </div>
-                              <div className="grid grid-cols-2 gap-4 mt-2">
-                                <div className="space-y-1">
-                                  <div className="flex justify-between text-sm">
-                                    <span className="text-gray-600">边缘密度</span>
-                                    <span className="font-medium">{(frame.metrics?.edgeDensity || 0).toFixed(3)}</span>
-                                  </div>
-                                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                    <div 
-                                      className={`h-full ${(frame.metrics?.edgeDensity || 0) > 0.15 ? 'bg-red-500' : 'bg-green-500'}`}
-                                      style={{ width: `${(frame.metrics?.edgeDensity || 0) * 100}%` }}
-                                    />
-                                  </div>
+            {/* 仅管理员可见的详细分析 */}
+            {isAdmin && (
+              <Card title="AI 判断依据" variant="outlined" className="bg-gradient-to-r from-blue-50 to-indigo-50">
+                <Collapse
+                  defaultActiveKey={['1', '2']}
+                  ghost
+                  items={[
+                    {
+                      key: '1',
+                      label: <span className="flex items-center gap-2"><BarChartOutlined /> 图像分析判定</span>,
+                      children: (
+                        <div className="space-y-4">
+                          <div className="bg-white rounded-lg p-4">
+                            <p className="text-sm font-medium text-gray-700 mb-3">关键帧检测指标：</p>
+                            {selectedReview.imageClassifications?.length > 0 && (
+                              <div className="space-y-4">
+                                {selectedReview.imageClassifications.slice(0, 3).map((frame, idx) => (
+                                  <div key={idx} className="border-t pt-3">
+                                    <p className="text-xs text-gray-500 mb-2">第 {idx + 1} 帧</p>
+                                    <div className="grid grid-cols-2 gap-4">
+                                      {renderMetricBar('皮肤占比', frame.metrics?.skinPercentage || 0, 100, 30, 45)}
+                                  {renderMetricBar('红色区域', frame.metrics?.bloodPercentage || 0, 100, 5, 15)}
                                 </div>
-                                <div className="space-y-1">
-                                  <div className="flex justify-between text-sm">
-                                    <span className="text-gray-600">画面混乱度</span>
-                                    <span className="font-medium">{(frame.metrics?.chaosScore || 0).toFixed(2)}</span>
-                                  </div>
-                                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                    <div 
-                                      className={`h-full ${(frame.metrics?.chaosScore || 0) > 0.6 ? 'bg-red-500' : (frame.metrics?.chaosScore || 0) > 0.4 ? 'bg-yellow-500' : 'bg-green-500'}`}
-                                      style={{ width: `${(frame.metrics?.chaosScore || 0) * 100}%` }}
-                                    />
-                                  </div>
+                                <div className="grid grid-cols-2 gap-4 mt-2">
+                                  {renderMetricBar('模糊度', frame.metrics?.blurScore || 0, 100, 50, 70)}
+                                  {renderMetricBar('色彩饱和度', frame.metrics?.colorSaturation || 0, 100, 85, 95)}
                                 </div>
-                              </div>
-                              <div className="flex justify-between text-sm mt-2">
-                                <span className="text-gray-600">人脸数量</span>
-                                <span className="font-medium">{frame.metrics?.faceCount || 0}</span>
-                              </div>
-                              <div className="flex justify-between text-sm mt-1">
-                                <span className="text-gray-600">帧分类</span>
-                                <Tag color={frame.class === 'normal' ? 'green' : frame.class === 'suggestive' ? 'orange' : frame.class === 'violent' ? 'purple' : 'red'}>
-                                  {frame.class === 'normal' ? '正常' : frame.class === 'suggestive' ? '暗示性' : frame.class === 'violent' ? '暴力' : '色情'}
-                                </Tag>
-                              </div>
-                                  {frame.reasoning && frame.reasoning.length > 0 && (
-                                    <div className="mt-2 space-y-1">
-                                      <p className="text-xs text-gray-500">判定理由：</p>
-                                      {frame.reasoning.map((reason, rIdx) => renderReasoningItem(reason, rIdx))}
+                                <div className="grid grid-cols-2 gap-4 mt-2">
+                                  <div className="space-y-1">
+                                    <div className="flex justify-between text-sm">
+                                      <span className="text-gray-600">边缘密度</span>
+                                      <span className="font-medium">{(frame.metrics?.edgeDensity || 0).toFixed(3)}</span>
                                     </div>
-                                  )}
+                                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full ${(frame.metrics?.edgeDensity || 0) > 0.15 ? 'bg-red-500' : 'bg-green-500'}`}
+                                        style={{ width: `${(frame.metrics?.edgeDensity || 0) * 100}%` }}
+                                      />
+                                    </div>
+                                  </div>
+                                  <div className="space-y-1">
+                                    <div className="flex justify-between text-sm">
+                                      <span className="text-gray-600">画面混乱度</span>
+                                      <span className="font-medium">{(frame.metrics?.chaosScore || 0).toFixed(2)}</span>
+                                    </div>
+                                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                                      <div 
+                                        className={`h-full ${(frame.metrics?.chaosScore || 0) > 0.6 ? 'bg-red-500' : (frame.metrics?.chaosScore || 0) > 0.4 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                        style={{ width: `${(frame.metrics?.chaosScore || 0) * 100}%` }}
+                                      />
+                                    </div>
+                                  </div>
                                 </div>
-                              ))}
-                            </div>
-                          )}
-                          {selectedReview.imageClassifications?.length === 0 && (
-                            <p className="text-gray-500 text-sm">暂无图像分析数据</p>
-                          )}
-                        </div>
-                      </div>
-                    ),
-                  },
-                  {
-                    key: '2',
-                    label: <span className="flex items-center gap-2"><InfoCircleOutlined /> 文本分析判定</span>,
-                    children: (
-                      <div className="space-y-4">
-                        <div className="bg-white rounded-lg p-4">
-                          <div className="flex items-center justify-between mb-3">
-                            <span className="text-sm font-medium text-gray-700">文本风险分数</span>
-                            <span className={`font-bold ${selectedReview.textRiskScore > 50 ? 'text-red-600' : selectedReview.textRiskScore > 20 ? 'text-orange-600' : 'text-green-600'}`}>
-                              {selectedReview.textRiskScore}
-                            </span>
-                          </div>
-                          {renderMetricBar('文本风险', selectedReview.textRiskScore || 0)}
-                          
-                          <div className="mt-4">
-                            <p className="text-sm text-gray-600 mb-2">检测到的敏感词：</p>
-                            {selectedReview.sensitiveKeywords && selectedReview.sensitiveKeywords.length > 0 ? (
-                              <div className="flex flex-wrap gap-2">
-                                {selectedReview.sensitiveKeywords.map((kw, idx) => (
-                                  <Tag key={idx} color="red">{kw}</Tag>
+                                <div className="flex justify-between text-sm mt-2">
+                                  <span className="text-gray-600">人脸数量</span>
+                                  <span className="font-medium">{frame.metrics?.faceCount || 0}</span>
+                                </div>
+                                <div className="flex justify-between text-sm mt-1">
+                                  <span className="text-gray-600">帧分类</span>
+                                  <Tag color={frame.class === 'normal' ? 'green' : frame.class === 'suggestive' ? 'orange' : frame.class === 'violent' ? 'purple' : 'red'}>
+                                    {frame.class === 'normal' ? '正常' : frame.class === 'suggestive' ? '暗示性' : frame.class === 'violent' ? '暴力' : '色情'}
+                                  </Tag>
+                                </div>
+                                    {frame.reasoning && frame.reasoning.length > 0 && (
+                                      <div className="mt-2 space-y-1">
+                                        <p className="text-xs text-gray-500">判定理由：</p>
+                                        {frame.reasoning.map((reason, rIdx) => renderReasoningItem(reason, rIdx))}
+                                      </div>
+                                    )}
+                                  </div>
                                 ))}
                               </div>
-                            ) : (
-                              <p className="text-gray-400 text-sm">未检测到敏感词</p>
+                            )}
+                            {selectedReview.imageClassifications?.length === 0 && (
+                              <p className="text-gray-500 text-sm">暂无图像分析数据</p>
                             )}
                           </div>
-
-                          {selectedReview.transcription && (
-                            <div className="mt-4">
-                              <p className="text-sm text-gray-600 mb-2">语音转写内容：</p>
-                              <div className="bg-gray-50 rounded-lg p-3">
-                                <p className="text-sm text-gray-700 whitespace-pre-wrap">
-                                  {selectedReview.transcription}
-                                </p>
-                              </div>
+                        </div>
+                      ),
+                    },
+                    {
+                      key: '2',
+                      label: <span className="flex items-center gap-2"><InfoCircleOutlined /> 文本分析判定</span>,
+                      children: (
+                        <div className="space-y-4">
+                          <div className="bg-white rounded-lg p-4">
+                            <div className="flex items-center justify-between mb-3">
+                              <span className="text-sm font-medium text-gray-700">文本风险分数</span>
+                              <span className={`font-bold ${selectedReview.textRiskScore > 50 ? 'text-red-600' : selectedReview.textRiskScore > 20 ? 'text-orange-600' : 'text-green-600'}`}>
+                                {selectedReview.textRiskScore}
+                              </span>
                             </div>
-                          )}
+                            {renderMetricBar('文本风险', selectedReview.textRiskScore || 0)}
+                            
+                            <div className="mt-4">
+                              <p className="text-sm text-gray-600 mb-2">检测到的敏感词：</p>
+                              {selectedReview.sensitiveKeywords && selectedReview.sensitiveKeywords.length > 0 ? (
+                                <div className="flex flex-wrap gap-2">
+                                  {selectedReview.sensitiveKeywords.map((kw, idx) => (
+                                    <Tag key={idx} color="red">{kw}</Tag>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-gray-400 text-sm">未检测到敏感词</p>
+                              )}
+                            </div>
+
+                            {selectedReview.transcription && (
+                              <div className="mt-4">
+                                <p className="text-sm text-gray-600 mb-2">语音转写内容：</p>
+                                <div className="bg-gray-50 rounded-lg p-3">
+                                  <p className="text-sm text-gray-700 whitespace-pre-wrap">
+                                    {selectedReview.transcription}
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    ),
-                  },
-                  {
-                    key: '3',
-                    label: '综合评估',
-                    children: (
-                      <div className="bg-white rounded-lg p-4">
-                        <div className="grid grid-cols-3 gap-4 mb-4">
-                          <div className="text-center">
-                            <p className="text-2xl font-bold text-blue-600">{selectedReview.textRiskScore}</p>
-                            <p className="text-sm text-gray-500">文本分数</p>
+                      ),
+                    },
+                    {
+                      key: '3',
+                      label: '综合评估',
+                      children: (
+                        <div className="bg-white rounded-lg p-4">
+                          <div className="grid grid-cols-3 gap-4 mb-4">
+                            <div className="text-center">
+                              <p className="text-2xl font-bold text-blue-600">{selectedReview.textRiskScore}</p>
+                              <p className="text-sm text-gray-500">文本分数</p>
+                            </div>
+                            <div className="text-center">
+                              <p className="text-2xl font-bold text-green-600">{selectedReview.imageRiskScore}</p>
+                              <p className="text-sm text-gray-500">图像分数</p>
+                            </div>
+                            <div className="text-center">
+                              <p className={`text-2xl font-bold ${selectedReview.riskLevel === 'pass' ? 'text-green-600' : selectedReview.riskLevel === 'suspicious' ? 'text-orange-600' : 'text-red-600'}`}>
+                                {selectedReview.overallRiskScore}
+                              </p>
+                              <p className="text-sm text-gray-500">综合分数</p>
+                            </div>
                           </div>
-                          <div className="text-center">
-                            <p className="text-2xl font-bold text-green-600">{selectedReview.imageRiskScore}</p>
-                            <p className="text-sm text-gray-500">图像分数</p>
-                          </div>
-                          <div className="text-center">
-                            <p className={`text-2xl font-bold ${selectedReview.riskLevel === 'pass' ? 'text-green-600' : selectedReview.riskLevel === 'suspicious' ? 'text-orange-600' : 'text-red-600'}`}>
-                              {selectedReview.overallRiskScore}
+                          
+                          <div className="bg-gray-50 rounded-lg p-3">
+                            <p className="text-sm text-gray-600">评分公式：</p>
+                            <p className="text-sm font-mono text-gray-700 mt-1">
+                              综合分数 = 文本分数 × 0.4 + 图像分数 × 0.6
                             </p>
-                            <p className="text-sm text-gray-500">综合分数</p>
+                            <p className="text-sm text-gray-500 mt-2">
+                              风险等级判定：&lt;30=通过，30-70=可疑，&gt;=70=违规
+                            </p>
                           </div>
                         </div>
-                        
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <p className="text-sm text-gray-600">评分公式：</p>
-                          <p className="text-sm font-mono text-gray-700 mt-1">
-                            综合分数 = 文本分数 × 0.4 + 图像分数 × 0.6
-                          </p>
-                          <p className="text-sm text-gray-500 mt-2">
-                            风险等级判定：&lt;30=通过，30-70=可疑，&gt;=70=违规
-                          </p>
-                        </div>
-                      </div>
-                    ),
-                  },
-                ]}
-              />
-            </Card>
+                      ),
+                    },
+                  ]}
+                />
+              </Card>
+            )}
 
-            <Form
-              form={reviewForm}
-              layout="vertical"
-              onFinish={handleSubmitReview}
-            >
-              <Form.Item
-                label="最终决定"
-                name="decision"
-                rules={[{ required: true, message: '请选择最终决定' }]}
+            {/* 非管理员用户简化的审核结果 */}
+            {!isAdmin && (
+              <Card title="审核结果" variant="outlined">
+                <div className="text-center py-4">
+                  <Tag color={colorMap[selectedReview.riskLevel]} className="text-xl px-6 py-2">
+                    {riskLevelMap[selectedReview.riskLevel]}
+                  </Tag>
+                  <p className="text-gray-500 mt-2">综合风险分数: {selectedReview.overallRiskScore}</p>
+                  {selectedReview.summary && (
+                    <div className="mt-4 text-left">
+                      <p className="text-sm text-gray-600 mb-2">AI分析摘要：</p>
+                      <p className="text-sm text-gray-700 bg-gray-50 rounded-lg p-3">{selectedReview.summary}</p>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )}
+
+            {isAdmin && (
+              <Form
+                form={reviewForm}
+                layout="vertical"
+                onFinish={handleSubmitReview}
               >
-                <Select placeholder="请选择">
-                  <Select.Option value="pass">通过</Select.Option>
-                  <Select.Option value="violation">违规</Select.Option>
-                  <Select.Option value="appeal_pending">待申诉</Select.Option>
-                </Select>
-              </Form.Item>
+                <Form.Item
+                  label="最终决定"
+                  name="decision"
+                  rules={[{ required: true, message: '请选择最终决定' }]}
+                >
+                  <Select placeholder="请选择">
+                    <Select.Option value="pass">通过</Select.Option>
+                    <Select.Option value="violation">违规</Select.Option>
+                    <Select.Option value="appeal_pending">待申诉</Select.Option>
+                  </Select>
+                </Form.Item>
 
-              <Form.Item
-                label="审核意见（必填）"
-                name="comment"
-                rules={[
-                  { required: true, message: '请输入审核意见' },
-                  { min: 10, message: '审核意见至少 10 个字符' },
-                ]}
-              >
-                <Input.TextArea rows={4} placeholder="请详细说明审核理由..." />
-              </Form.Item>
+                <Form.Item
+                  label="审核意见（必填）"
+                  name="comment"
+                  rules={[
+                    { required: true, message: '请输入审核意见' },
+                    { min: 10, message: '审核意见至少 10 个字符' },
+                  ]}
+                >
+                  <Input.TextArea rows={4} placeholder="请详细说明审核理由..." />
+                </Form.Item>
 
-              <Form.Item>
-                <Button type="primary" htmlType="submit" loading={loading} block>
-                  提交复审
-                </Button>
-              </Form.Item>
-            </Form>
+                <Form.Item>
+                  <Button type="primary" htmlType="submit" loading={loading} block>
+                    提交复审
+                  </Button>
+                </Form.Item>
+              </Form>
+            )}
           </div>
         )}
       </Modal>

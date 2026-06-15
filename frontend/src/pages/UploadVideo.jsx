@@ -15,15 +15,21 @@ const UploadVideo = () => {
       return;
     }
 
+    const file = fileList[0].originFileObj || fileList[0];
+    if (!file || !file.size || file.size === 0) {
+      message.error('无效的视频文件');
+      return;
+    }
+
     setUploading(true);
     const formData = new FormData();
-    formData.append('video', fileList[0].originFileObj || fileList[0]);
+    formData.append('video', file);
     formData.append('title', values.title);
     formData.append('description', values.description || '');
     formData.append('category', values.category);
 
     try {
-      await videoAPI.uploadVideo(formData);
+      const response = await videoAPI.uploadVideo(formData);
       message.success('视频上传成功，系统正在处理...');
       form.resetFields();
       setFileList([]);

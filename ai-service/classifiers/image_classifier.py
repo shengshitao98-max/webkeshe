@@ -239,47 +239,49 @@ class ImageClassifier:
         
         violence_detected = False
         
-        if blood_percentage > 2:
-            risk_score += 25
+        if blood_percentage > 15:
+            risk_score += 5
             reasoning.append(f"检测到红色区域: {blood_percentage:.1f}% (可能为血液)")
-            violence_detected = True
+            violence_detected = False
             
-            if blood_percentage > 5:
-                risk_score += 20
+            if blood_percentage > 25:
+                risk_score += 8
                 reasoning.append(f"红色区域占比较高: {blood_percentage:.1f}% (高度怀疑血腥内容)")
                 violence_detected = True
                 
-                if blood_percentage > 10:
-                    risk_score += 25
+                if blood_percentage > 35:
+                    risk_score += 8
                     reasoning.append(f"红色区域占比极高: {blood_percentage:.1f}% (强烈怀疑血腥暴力内容)")
         
-        if edge_density > 0.12:
-            risk_score += 15
+        if edge_density > 0.3:
+            risk_score += 3
             reasoning.append(f"边缘密度较高: {edge_density:.3f} (可能存在激烈动作)")
-            violence_detected = True
+            violence_detected = False
             
-            if edge_density > 0.2:
-                risk_score += 10
+            if edge_density > 0.42:
+                risk_score += 3
                 reasoning.append(f"边缘密度极高: {edge_density:.3f} (强烈怀疑暴力冲突)")
+                violence_detected = True
         
-        if chaos_score > 0.55:
-            risk_score += 10
+        if chaos_score > 0.82:
+            risk_score += 2
             reasoning.append(f"画面混乱度较高: {chaos_score:.2f} (可能存在暴力冲突)")
-            violence_detected = True
+            violence_detected = False
             
-            if chaos_score > 0.7:
-                risk_score += 10
+            if chaos_score > 0.92:
+                risk_score += 2
                 reasoning.append(f"画面混乱度极高: {chaos_score:.2f} (强烈怀疑暴力冲突)")
+                violence_detected = True
         
         dark_percentage = self._calculate_dark_percentage(image)
-        if dark_percentage > 70:
-            risk_score += 10
+        if dark_percentage > 93:
+            risk_score += 2
             reasoning.append(f"画面暗区占比过高: {dark_percentage:.1f}% (可能为夜间暴力场景)")
-            violence_detected = True
+            violence_detected = False
         
         color_contrast = self._calculate_color_contrast(image)
-        if color_contrast > 80:
-            risk_score += 8
+        if color_contrast > 95:
+            risk_score += 2
             reasoning.append(f"色彩对比度极高: {color_contrast:.1f} (可能存在强烈视觉冲击)")
         
         if violence_detected:
@@ -287,33 +289,33 @@ class ImageClassifier:
             reasoning.append("综合判定：存在暴力内容特征")
         
         if not violence_detected:
-            if skin_percentage > 45:
-                risk_score += 40
-                reasoning.append(f"皮肤占比过高: {skin_percentage:.1f}% (超过45%)")
+            if skin_percentage > 55:
+                risk_score += 25
+                reasoning.append(f"皮肤占比过高: {skin_percentage:.1f}% (超过55%)")
                 class_label = 'pornographic'
                 
                 if face_count == 0:
-                    risk_score += 15
+                    risk_score += 10
                     reasoning.append("未检测到人脸，可能存在不当构图")
             
-            elif skin_percentage > 30:
-                risk_score += 20
-                reasoning.append(f"皮肤占比较高: {skin_percentage:.1f}% (30%-45%)")
+            elif skin_percentage > 40:
+                risk_score += 12
+                reasoning.append(f"皮肤占比较高: {skin_percentage:.1f}% (40%-55%)")
                 
                 if face_count >= 2:
-                    risk_score += 10
+                    risk_score += 6
                     reasoning.append(f"检测到{face_count}张人脸，可能存在多人场景")
                 elif face_count == 0:
-                    risk_score += 5
+                    risk_score += 3
                     reasoning.append("未检测到人脸")
                 
-                if skin_percentage > 35:
+                if skin_percentage > 45:
                     class_label = 'suggestive'
-                    risk_score += 10
+                    risk_score += 6
                     reasoning.append("皮肤占比接近高风险阈值")
             
-            elif skin_percentage > 15:
-                risk_score += 5
+            elif skin_percentage > 20:
+                risk_score += 3
                 reasoning.append(f"皮肤占比正常偏高: {skin_percentage:.1f}%")
                 
                 if face_count == 1:
@@ -325,16 +327,16 @@ class ImageClassifier:
                     reasoning.append(f"检测到{face_count}张人脸")
         
         blur_score = self._calculate_blur(image)
-        if blur_score > 50:
-            risk_score += 10
+        if blur_score > 70:
+            risk_score += 5
             reasoning.append(f"图像模糊度较高: {blur_score:.1f}% (可能为故意模糊)")
         
         color_saturation = self._calculate_saturation(hsv)
-        if color_saturation > 85:
-            risk_score += 5
+        if color_saturation > 92:
+            risk_score += 3
             reasoning.append(f"色彩饱和度较高: {color_saturation:.1f}%")
-        elif color_saturation < 20:
-            risk_score += 5
+        elif color_saturation < 12:
+            risk_score += 3
             reasoning.append(f"色彩饱和度较低: {color_saturation:.1f}% (可能为低质量内容)")
         
         if risk_score == 0:

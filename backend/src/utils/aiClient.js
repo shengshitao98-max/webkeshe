@@ -16,10 +16,11 @@ export const aiServiceClient = {
     }
   },
 
-  async analyzeVideoWithKimi(videoPath) {
+  async analyzeVideoWithKimi(videoPath, kimiThreshold = 30) {
     try {
       const response = await axios.post(`${AI_SERVICE_URL}/api/analyze-video`, {
         videoPath,
+        kimiThreshold,
       }, { timeout: 300000 }); // 5 minutes for video upload + analysis
       return response.data;
     } catch (error) {
@@ -38,6 +39,18 @@ export const aiServiceClient = {
     } catch (error) {
       logger.error('AI Service error:', error.message);
       throw new Error('Video analysis failed');
+    }
+  },
+
+  async performLocalAnalysis(videoPath) {
+    try {
+      const response = await axios.post(`${AI_SERVICE_URL}/api/analyze-local`, {
+        videoPath,
+      }, { timeout: 120000 }); // 2 minutes timeout
+      return response.data;
+    } catch (error) {
+      logger.error('Local analysis error:', error.message);
+      throw new Error('Local analysis failed');
     }
   },
 

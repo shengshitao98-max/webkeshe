@@ -33,20 +33,20 @@ class KeywordDetector:
         
         self.keywords_db = {
             'political': [
-                '独立', '分裂', '颠覆', '渗透',
-                '台独', '疆独', '藏独',
+                '台独', '疆独', '藏独', '港独',
+                '分裂国家', '颠覆政权', '恐怖主义',
             ],
             'porn': [
-                '色情', '淫秽', '成人',
-                '裸露', '下流', '猥琐',
+                '色情', '淫秽', '裸露', '下流', '猥琐',
+                '性交易', '卖淫', '嫖娼',
             ],
             'violence': [
-                '暴力', '杀害', '砍杀',
-                '打死', '流血', '凶残',
+                '暴力', '杀害', '砍杀', '殴打',
+                '血腥', '屠杀', '袭击',
             ],
             'illegal': [
-                '毒品', '贩毒', '吸毒',
-                '诈骗', '赌博', '洗钱',
+                '毒品', '贩毒', '吸毒', '制毒',
+                '诈骗', '赌博', '洗钱', '走私',
             ],
         }
         
@@ -126,12 +126,13 @@ class KeywordDetector:
             logger.error(f'Error calling Kimi API: {str(e)}')
             return None
     
-    def detect_keywords(self, text):
+    def detect_keywords(self, text, use_kimi=True):
         """
         Detect sensitive keywords in text using Kimi API or local detection
         
         Args:
             text: Input text to analyze
+            use_kimi: Whether to use Kimi API for detection
             
         Returns:
             Dictionary with detected keywords and risk score
@@ -139,13 +140,14 @@ class KeywordDetector:
         if not text:
             return {'keywords': [], 'riskScore': 0}
         
-        api_result = self._call_kimi_api(text)
-        if api_result:
-            logger.info(f'Kimi API result: {api_result}')
-            return {
-                'keywords': api_result.get('keywords', []),
-                'riskScore': api_result.get('risk_score', 0),
-            }
+        if use_kimi:
+            api_result = self._call_kimi_api(text)
+            if api_result:
+                logger.info(f'Kimi API result: {api_result}')
+                return {
+                    'keywords': api_result.get('keywords', []),
+                    'riskScore': api_result.get('risk_score', 0),
+                }
         
         detected_keywords = []
         total_score = 0

@@ -38,8 +38,9 @@ export const calculateRiskLevel = (score) => {
   return 'violation';
 };
 
-export const calculateOverallRiskScore = (textScore, imageScore, weights = { text: 0.4, image: 0.6 }) => {
-  return Math.round(textScore * weights.text + imageScore * weights.image);
+export const calculateOverallRiskScore = (textScore, imageScore, weights = { text: 0.3, image: 0.7 }) => {
+  const cappedTextScore = Math.min(textScore, 50);
+  return Math.round(cappedTextScore * weights.text + imageScore * weights.image);
 };
 
 export const sanitizeFilename = (filename) => {

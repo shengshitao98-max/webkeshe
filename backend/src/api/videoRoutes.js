@@ -22,6 +22,9 @@ router.get('/thumbnail/:videoId', authMiddleware, videoController.getThumbnail);
 // Get analysis result (authenticated)
 router.get('/:videoId/analysis', authMiddleware, videoController.getAnalysisResult);
 
+// Re-analyze video (admin only)
+router.post('/:videoId/reanalyze', authMiddleware, roleMiddleware(['admin']), videoController.reanalyzeVideo);
+
 // Delete video (uploader or admin)
 router.delete('/:videoId', authMiddleware, videoController.deleteVideo);
 

@@ -6,7 +6,23 @@ const api = axios.create({
   baseURL: API_BASE_URL,
 });
 
-// Add token to requests
+const authApi = axios.create({
+  baseURL: API_BASE_URL,
+});
+
+const uploadApi = axios.create({
+  baseURL: API_BASE_URL,
+});
+
+uploadApi.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
   if (token) {
@@ -17,7 +33,7 @@ api.interceptors.request.use((config) => {
 });
 
 export const videoAPI = {
-  uploadVideo: (formData) => api.post('/videos/upload', formData),
+  uploadVideo: (formData) => uploadApi.post('/videos/upload', formData),
   getVideo: (videoId) => api.get(`/videos/${videoId}`),
   listVideos: (status, limit = 20, offset = 0) => api.get('/videos', {
     params: { status, limit, offset },
@@ -47,10 +63,11 @@ export const statisticsAPI = {
 };
 
 export const authAPI = {
-  login: (username, password) => api.post('/auth/login', { username, password }),
+  login: (username, password) => authApi.post('/auth/login', { username, password }),
   logout: () => {
     localStorage.removeItem('token');
   },
+  getMe: () => api.get('/auth/me'),
 };
 
 export default api;

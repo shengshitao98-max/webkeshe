@@ -1,5 +1,6 @@
 import { videoService } from '../services/videoService.js';
 import { logger } from '../utils/helpers.js';
+import { aiServiceClient } from '../utils/aiClient.js';
 import { User, AuditResult } from '../models/index.js';
 import path from 'path';
 import fs from 'fs';
@@ -70,14 +71,98 @@ export const videoController = {
       const filePath = path.join(uploadDir, filename);
 
       logger.info(`Saving file to: ${filePath}`);
+      logger.info(`Video file info - tempFilePath: ${videoFile.tempFilePath}, has mv: ${typeof videoFile.mv === 'function'}, size: ${videoFile.size}`);
 
-      // Handle file based on whether it's in memory or temp file
-      if (videoFile.data) {
-        await fs.promises.writeFile(filePath, videoFile.data);
-      } else if (videoFile.tempFilePath) {
-        await fs.promises.copyFile(videoFile.tempFilePath, filePath);
-      } else {
-        await videoFile.mv(filePath);
+      let fileSaved = false;
+      
+      if (videoFile.tempFilePath) {
+        const tempPath = videoFile.tempFilePath;
+        const tempExists = fs.existsSync(tempPath);
+        logger.info(`Temp file exists at ${tempPath}: ${tempExists}`);
+        
+        if (tempExists) {
+          try {
+            const tempSize = fs.statSync(tempPath).size;
+            logger.info(`Temp file size: ${tempSize}`);
+            await fs.promises.copyFile(tempPath, filePath);
+            fileSaved = true;
+            logger.info('Successfully copied from temp file');
+          } catch (copyError) {
+            logger.error(`Failed to copy from temp file: ${copyError.message}`);
+          }
+        }
+      }
+
+      if (!fileSaved && typeof videoFile.mv === 'function') {
+        try {
+          logger.info('Using mv method to move file');
+          await new Promise((resolve, reject) => {
+            videoFile.mv(filePath, (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          });
+          fileSaved = true;
+          logger.info('Successfully moved file using mv method');
+        } catch (mvError) {
+          logger.error(`Failed to move file: ${mvError.message}`);
+        }
+      }
+
+      if (!fileSaved && videoFile.data && videoFile.data.length > 0) {
+        try {
+          logger.info(`Writing from buffer, size: ${videoFile.data.length}`);
+          await fs.promises.writeFile(filePath, videoFile.data);
+          fileSaved = true;
+          logger.info('Successfully wrote from buffer');
+        } catch (writeError) {
+          logger.error(`Failed to write from buffer: ${writeError.message}`);
+        }
+      }
+
+      if (!fileSaved) {
+        logger.error('No valid file data found to save - checking for alternative temp paths');
+        
+        const altTempDirs = ['./tmp', '../tmp', path.join(__dirname, '..', 'tmp')];
+        for (const altDir of altTempDirs) {
+          const possibleTempFiles = fs.readdirSync(altDir, { withFileTypes: true })
+            .filter(f => f.isFile() && f.name.includes('tmp-'))
+            .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+          
+          if (possibleTempFiles.length > 0) {
+            const latestTemp = path.join(altDir, possibleTempFiles[0].name);
+            const tempSize = fs.statSync(latestTemp).size;
+            logger.info(`Found temp file: ${latestTemp}, size: ${tempSize}`);
+            
+            if (tempSize > 0 && tempSize === videoFile.size) {
+              try {
+                await fs.promises.copyFile(latestTemp, filePath);
+                fileSaved = true;
+                logger.info(`Successfully copied from alternative temp file: ${latestTemp}`);
+                break;
+              } catch (copyError) {
+                logger.error(`Failed to copy from alt temp: ${copyError.message}`);
+              }
+            }
+          }
+        }
+      }
+
+      if (!fileSaved) {
+        logger.error('Failed to save video file using all available methods');
+        return res.status(500).json({ error: 'Failed to save video file' });
+      }
+
+      const savedSize = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
+      logger.info(`File saved, size: ${savedSize}, original size: ${videoFile.size}`);
+      
+      if (savedSize === 0) {
+        logger.error(`File save resulted in empty file`);
+        return res.status(500).json({ error: 'File save resulted in empty file' });
+      }
+      
+      if (savedSize !== videoFile.size) {
+        logger.warn(`File size mismatch. Saved: ${savedSize}, Expected: ${videoFile.size}. Continuing anyway...`);
       }
 
       logger.info('File saved successfully, creating database record');
@@ -167,6 +252,36 @@ export const videoController = {
     }
   },
 
+  async reanalyzeVideo(req, res) {
+    try {
+      const { videoId } = req.params;
+      const video = await videoService.getVideoById(videoId);
+
+      if (!video) {
+        return res.status(404).json({ error: 'Video not found' });
+      }
+
+      // Check permission
+      if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // Delete existing audit result if any
+      await videoService.deleteAnalysisResult(videoId);
+
+      // Re-analyze the video
+      const auditResult = await videoService.analyzeVideo(video.id, video.filePath);
+
+      res.json({
+        message: 'Video re-analyzed successfully',
+        auditResult,
+      });
+    } catch (error) {
+      logger.error('Re-analyze video error', error);
+      res.status(500).json({ error: 'Failed to re-analyze video: ' + error.message });
+    }
+  },
+
   async deleteVideo(req, res) {
     try {
       const { videoId } = req.params;
@@ -208,8 +323,16 @@ export const videoController = {
 
       if (range) {
         const parts = range.replace(/bytes=/, '').split('-');
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        let start = parseInt(parts[0], 10);
+        let end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        if (isNaN(start) || start < 0) {
+          start = 0;
+        }
+        if (isNaN(end) || end < 0 || end >= fileSize) {
+          end = fileSize - 1;
+        }
+
         const chunksize = (end - start) + 1;
         const file = fs.createReadStream(filePath, { start, end });
         const head = {
@@ -260,13 +383,27 @@ export const videoController = {
       // Try to use first keyframe from audit result
       const auditResult = await AuditResult.findOne({ where: { videoId } });
       if (auditResult && auditResult.keyframes && auditResult.keyframes.length > 0) {
-        // Keyframe paths from AI service are absolute paths
         let firstKeyframe = auditResult.keyframes[0];
         if (fs.existsSync(firstKeyframe)) {
           res.setHeader('Content-Type', 'image/jpeg');
           fs.createReadStream(firstKeyframe).pipe(res);
           return;
         }
+      }
+
+      // Try to extract keyframe from AI service
+      try {
+        const keyframesResult = await aiServiceClient.extractKeyframes(filePath, 1);
+        if (keyframesResult && keyframesResult.keyframes && keyframesResult.keyframes.length > 0) {
+          const firstKeyframe = keyframesResult.keyframes[0];
+          if (fs.existsSync(firstKeyframe)) {
+            res.setHeader('Content-Type', 'image/jpeg');
+            fs.createReadStream(firstKeyframe).pipe(res);
+            return;
+          }
+        }
+      } catch (aiError) {
+        logger.warn('AI service keyframe extraction failed, falling back', aiError.message);
       }
 
       // Fall back to returning 204 No Content
