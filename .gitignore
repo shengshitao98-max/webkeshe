@@ -44,3 +44,9 @@ backend/data/*.db
 # Cache
 .cache/
 *.pt
+
+# Large files - models and datasets
+models/
+nsfw-resnet-master/
+*.safetensors
+*.pth

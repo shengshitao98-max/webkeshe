@@ -30,6 +30,30 @@ local_monitor = LocalFrameMonitor()
 frame_comparator = FrameComparator()
 local_db = LocalFrameDatabase()
 
+def load_analyzer_model():
+    model_paths = [
+        'models/classifier_model.pkl',
+        'f:/04-CODE/webkeshe/models/classifier_model.pkl',
+        os.path.join(os.path.dirname(__file__), 'models', 'classifier_model.pkl')
+    ]
+    
+    for model_path in model_paths:
+        if os.path.exists(model_path):
+            logger.info(f'检测到预训练模型: {model_path}')
+            try:
+                import pickle
+                with open(model_path, 'rb') as f:
+                    svm_model = pickle.load(f)
+                    content_analyzer.svm_classifier = svm_model
+                    logger.info('SVM分类器加载成功')
+            except Exception as e:
+                logger.warning(f'SVM模型加载失败: {str(e)}')
+            return
+    
+    logger.info('使用ViT-Large作为主要分类器')
+
+load_analyzer_model()
+
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
@@ -101,7 +125,7 @@ def perform_local_analysis(video_path):
     """Perform local screening analysis using SVM + 26D features algorithm (based on Ren Dong paper)"""
     logger.info(f'Performing local analysis for: {video_path}')
     
-    keyframes = video_processor.extract_keyframes(video_path)
+    keyframes = video_processor.extract_keyframes(video_path, interval=0.2)
     
     analyzer_results = content_analyzer.classify_images(keyframes)
     
@@ -110,61 +134,117 @@ def perform_local_analysis(video_path):
     if audio_path and os.path.exists(audio_path):
         transcription = video_processor.transcribe_audio(audio_path)
     
-    keyword_results = keyword_detector.detect_keywords(transcription, use_kimi=False)
+    keyword_results = keyword_detector.detect_keywords(transcription, use_kimi=True)
     
     overall_risk = 0
     overall_class = 'normal'
     reasoning = []
-    frame_reasoning = []
     
     suspicious_frames = 0
     violation_frames = 0
+    detected_objects = set()
+    max_vit_score = 0
+    vit_detection_count = 0
+    blood_frames = 0
+    max_blood_ratio = 0
+    frame_risk_sum = 0
     
     for frame_result in analyzer_results:
         frame_risk = frame_result.get('risk_score', 0)
-        if frame_risk > overall_risk:
-            overall_risk = frame_risk
+        vit_score = frame_result.get('vit_score', 0) or frame_result.get('resnet_score', 0)
+        
+        blood_ratio = frame_result.get('blood_ratio', 0)
+        is_blood = frame_result.get('is_blood', False)
+        if blood_ratio > max_blood_ratio:
+            max_blood_ratio = blood_ratio
+        if is_blood:
+            blood_frames += 1
+        
+        if vit_score > max_vit_score:
+            max_vit_score = vit_score
+        if vit_score > 0:
+            vit_detection_count += 1
+        
+        frame_risk_sum += frame_risk
         
         frame_class = frame_result.get('class', 'normal')
         
         if frame_class == 'violation':
             violation_frames += 1
-            overall_class = 'pornographic'
         elif frame_class == 'suspicious':
             suspicious_frames += 1
-            if overall_class == 'normal':
-                overall_class = 'suggestive'
         
-        if frame_result.get('reasoning'):
-            frame_reasoning.extend(frame_result['reasoning'])
         if frame_result.get('objects'):
             obj_names = [obj['name'] for obj in frame_result['objects']]
-            frame_reasoning.append(f"检测到物体: {', '.join(obj_names)}")
+            detected_objects.update(obj_names)
+    
+    if analyzer_results:
+        overall_risk = frame_risk_sum / len(analyzer_results)
+    
+    if blood_frames > 0 and max_blood_ratio > 0.05:
+        blood_ratio_in_video = blood_frames / len(analyzer_results)
+        blood_score_base = 30 + blood_ratio_in_video * 60
+        overall_risk = max(overall_risk, blood_score_base)
     
     reasoning.append(f"分析帧数: {len(keyframes)}")
-    reasoning.append(f"平均肤色占比: {sum(r.get('skin_ratio', 0) for r in analyzer_results) / max(len(analyzer_results), 1):.2%}")
+    
+    avg_skin_ratio = sum(r.get('skin_ratio', 0) for r in analyzer_results) / max(len(analyzer_results), 1)
+    reasoning.append(f"平均肤色占比: {avg_skin_ratio:.2%}")
+    
+    avg_svm_score = sum(r.get('svm_score', 0) for r in analyzer_results) / max(len(analyzer_results), 1)
+    reasoning.append(f"平均SVM评分: {avg_svm_score:.1f}")
+    
+    avg_face_count = sum(r.get('faces', 0) for r in analyzer_results) / max(len(analyzer_results), 1)
+    if avg_face_count > 0:
+        reasoning.append(f"平均人脸数量: {avg_face_count:.1f}")
     
     if violation_frames > 0:
         reasoning.append(f"检测到 {violation_frames} 帧违规内容")
     if suspicious_frames > 0:
         reasoning.append(f"检测到 {suspicious_frames} 帧可疑内容")
     
-    if keyword_results['riskScore'] > overall_risk:
-        overall_risk = keyword_results['riskScore']
-        if keyword_results['riskScore'] > 50:
-            if any('血腥' in str(k) for k in keyword_results.get('keywords', [])):
-                overall_class = 'bloody'
-            elif any('暴力' in str(k) for k in keyword_results.get('keywords', [])):
-                overall_class = 'violent'
-            elif any('色情' in str(k) for k in keyword_results.get('keywords', [])):
+    vit_ratio = vit_detection_count / len(analyzer_results) if analyzer_results else 0
+    if vit_detection_count > 0:
+        reasoning.append(f"ViT检测到 {vit_detection_count} 帧NSFW内容，最高评分: {max_vit_score:.1f}，占比: {vit_ratio:.1%}")
+    
+    if vit_ratio > 0.15:
+        if max_vit_score > overall_risk:
+            overall_risk = max_vit_score * 0.8 + overall_risk * 0.2
+            if max_vit_score >= 70:
                 overall_class = 'pornographic'
-            else:
+            elif max_vit_score >= 50:
                 overall_class = 'suggestive'
+    elif vit_ratio > 0.08:
+        if max_vit_score > overall_risk:
+            overall_risk = max_vit_score * 0.5 + overall_risk * 0.5
+            if max_vit_score >= 80:
+                overall_class = 'pornographic'
+            elif max_vit_score >= 60:
+                overall_class = 'suggestive'
+    
+    if blood_frames > 0 and max_blood_ratio > 0.05 and overall_class == 'normal':
+        overall_class = 'bloody'
+        reasoning.append(f"检测到 {blood_frames} 帧血腥内容，最大血腥占比: {max_blood_ratio:.2%}")
+    
+    keyword_risk = keyword_results['riskScore']
+    if keyword_risk > 0:
+        keyword_risk = min(keyword_risk, 30)
+        if keyword_risk > overall_risk:
+            overall_risk = keyword_risk * 0.5 + overall_risk * 0.5
+            if any('色情' in str(k) for k in keyword_results.get('keywords', [])):
+                overall_class = 'pornographic'
+            elif any('血腥' in str(k) for k in keyword_results.get('keywords', [])):
+                if overall_class == 'normal':
+                    overall_class = 'bloody'
+            elif any('暴力' in str(k) for k in keyword_results.get('keywords', [])):
+                if overall_class == 'normal':
+                    overall_class = 'violent'
     
     if keyword_results.get('keywords'):
         reasoning.append(f"检测到敏感词: {', '.join(keyword_results['keywords'])}")
     
-    reasoning.extend(frame_reasoning[:10])
+    if detected_objects:
+        reasoning.append(f"检测到物体: {', '.join(detected_objects)}")
     
     class_description = {
         'normal': '正常',
@@ -175,6 +255,23 @@ def perform_local_analysis(video_path):
         'political': '政治敏感'
     }
     
+    import json
+    import numpy as np
+    
+    def serialize(obj):
+        if isinstance(obj, (np.integer, np.floating, np.bool_)):
+            return obj.item()
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: serialize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [serialize(item) for item in obj]
+        return obj
+    
+    analyzer_results_serialized = serialize(analyzer_results)
+    keyword_results_serialized = serialize(keyword_results)
+    
     result = {
         'status': 'success',
         'analysisMethod': 'svm_26d',
@@ -182,11 +279,11 @@ def perform_local_analysis(video_path):
         'className': class_description.get(overall_class, overall_class),
         'riskScore': overall_risk,
         'reasoning': reasoning,
-        'summary': f"本地分析（SVM+26D特征）完成，检测到 {len(keyframes)} 个关键帧，风险等级: {class_description.get(overall_class, overall_class)}",
+        'summary': f"本地分析（SVM+26D特征）完成，检测到 {len(keyframes)} 个关键帧",
         'keyframes': keyframes,
-        'analyzerResults': analyzer_results,
+        'analyzerResults': analyzer_results_serialized,
         'transcription': transcription,
-        'keywordResults': keyword_results,
+        'keywordResults': keyword_results_serialized,
         'suspiciousFrames': suspicious_frames,
         'violationFrames': violation_frames,
     }

@@ -105,21 +105,22 @@ export const videoService = {
         );
       }
 
+      const ENABLE_KIMI_API = true;
       let kimiResult = null;
-      let analysisMethod = 'kimi';
+      let analysisMethod = 'local_only';
       let localThreshold = 30;
       
       // Step 1: Perform local image analysis
       let localAnalysisResult = null;
       try {
         localAnalysisResult = await aiServiceClient.performLocalAnalysis(filePath);
+        logger.info(`Local analysis completed - Risk: ${localAnalysisResult.riskScore}, Class: ${localAnalysisResult.class}`);
       } catch (localError) {
         logger.warn('Local analysis failed', { error: localError.message });
-        localAnalysisResult = { riskScore: 0, class: 'normal' };
+        localAnalysisResult = { riskScore: 0, class: 'normal', violation_type: '正常' };
       }
 
       // Step 2: Extract audio and transcribe BEFORE deciding whether to call Kimi API
-      // This allows us to consider both visual and audio risks
       let audioExtracted = { audioPath: null };
       try {
         audioExtracted = await aiServiceClient.extractAudio(filePath);
@@ -127,7 +128,6 @@ export const videoService = {
         logger.warn('Audio extraction failed', { error: error.message });
       }
 
-      // Transcribe audio
       let transcription = { text: '' };
       try {
         if (audioExtracted.audioPath) {
@@ -157,16 +157,15 @@ export const videoService = {
       // Step 5: Decide whether to call Kimi API based on BOTH visual and audio risk
       const imageRisk = localAnalysisResult.riskScore || 0;
       const textRisk = sensitiveDetection.riskScore || 0;
-      
-      // Combined risk: image risk is primary, text risk is secondary
       const combinedRisk = imageRisk * 0.7 + textRisk * 0.3;
       
       logger.info(`Analysis risks - Image: ${imageRisk}, Text: ${textRisk}, Combined: ${combinedRisk.toFixed(1)}`);
       
-      if (combinedRisk >= localThreshold) {
+      if (ENABLE_KIMI_API && combinedRisk >= localThreshold) {
         logger.info(`Combined risk detected (${combinedRisk.toFixed(1)} >= ${localThreshold}), calling Kimi API`);
         try {
           kimiResult = await aiServiceClient.analyzeVideoWithKimi(filePath, localThreshold);
+          analysisMethod = 'kimi';
         } catch (kimiError) {
           logger.warn('Kimi API failed, using local analysis result', { error: kimiError.message });
           kimiResult = {
@@ -184,18 +183,22 @@ export const videoService = {
           analysisMethod = 'local_fallback';
         }
       } else {
-        logger.info(`Combined risk passed (${combinedRisk.toFixed(1)} < ${localThreshold}), skipping Kimi API`);
+        if (!ENABLE_KIMI_API) {
+          logger.info('Kimi API is disabled (ENABLE_KIMI_API=false), using local analysis only');
+        } else {
+          logger.info(`Combined risk passed (${combinedRisk.toFixed(1)} < ${localThreshold}), skipping Kimi API`);
+        }
         kimiResult = {
           kimiVideoAnalysis: {
             class: localAnalysisResult.class || 'normal',
             riskScore: imageRisk,
-            confidence: 0.9,
+            confidence: 0.95,
             reasoning: localAnalysisResult.reasoning || ['本地分析完成'],
             metrics: {},
           },
-          summary: localAnalysisResult.summary || '本地分析通过',
+          summary: localAnalysisResult.summary || '本地分析完成',
           analysisMethod: 'local_only',
-          localThreshold: localThreshold,
+          violationType: localAnalysisResult.violation_type || '正常',
         };
         analysisMethod = 'local_only';
       }

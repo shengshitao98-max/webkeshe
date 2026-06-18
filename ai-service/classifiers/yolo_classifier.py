@@ -1,465 +1,504 @@
 import cv2
 import numpy as np
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from enum import Enum
+from typing import Dict, List, Tuple, Optional, Any
 import logging
 import os
+import pickle
+
 
 logger = logging.getLogger(__name__)
 
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    YOLO_AVAILABLE = False
 
-class VideoContentAnalyzer:
-    """基于SVM与26维特征的不良视频检测系统（参考任栋论文）"""
-    
-    def __init__(self):
-        self.svm_classifier = None
-        self.scaler = StandardScaler()
-        self.face_cascade = None
-        self.yolo_model = None
-        self._initialize_components()
-    
-    def _initialize_components(self):
-        """初始化分类器和检测器"""
+class DetectionResult(Enum):
+    NORMAL = 'normal'
+    SUSPICIOUS = 'suspicious'
+    VIOLATION = 'violation'
+
+
+class Config:
+    SKIN_LOWER_YCBCR = np.array([0, 133, 77], dtype=np.uint8)
+    SKIN_UPPER_YCBCR = np.array([255, 173, 127], dtype=np.uint8)
+    SKIN_LOWER_HSV = np.array([0, 20, 40], dtype=np.uint8)
+    SKIN_UPPER_HSV = np.array([25, 255, 255], dtype=np.uint8)
+
+    BLOOD_LOWER_HSV1 = np.array([0, 80, 80])
+    BLOOD_UPPER_HSV1 = np.array([8, 255, 255])
+    BLOOD_LOWER_HSV2 = np.array([172, 80, 80])
+    BLOOD_UPPER_HSV2 = np.array([180, 255, 255])
+
+    YOLO_LOCAL_PATHS = [
+        'yolov8n.pt',
+        '/models/yolov8n.pt',
+        'f:/04-CODE/webkeshe/models/yolov8n.pt',
+    ]
+
+    SENSITIVE_CLASSES: Dict[str, int] = {
+        'knife': 35, 'gun': 45, 'fire': 25, 'scissors': 30,
+        'axe': 40, 'hammer': 30, 'bottle': 15, 'cup': 10, 'fork': 15
+    }
+
+    THRESHOLD_VIOLATION = 70
+    THRESHOLD_SUSPICIOUS = 40
+    THRESHOLD_SKIN_HIGH = 0.3
+    THRESHOLD_SKIN_LOW = 0.1
+    THRESHOLD_BREAST = 0.02
+    THRESHOLD_BLOOD = 0.03
+
+
+class FeatureExtractor:
+    def __init__(self, model_name='resnet50'):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        if model_name == 'resnet101':
+            self.model = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
+            self.feature_dim = 2048
+        else:
+            self.model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+            self.feature_dim = 2048
+
+        self.model = nn.Sequential(*list(self.model.children())[:-1])
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.model = self.model.to(self.device).eval()
+
+    def extract(self, image):
         try:
-            C = 2
-            gamma = 2 ** (-4.5)
-            
-            self.svm_classifier = SVC(
-                kernel='rbf',
-                C=C,
-                gamma=gamma,
-                probability=True,
-                class_weight='balanced'
-            )
-            logger.info(f'SVM分类器初始化完成（C={C}, gamma={gamma:.4f}, RBF核）')
-            
-            self.face_cascade = cv2.CascadeClassifier(
-                cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            )
-            logger.info('人脸检测器初始化完成（AdaBoost）')
-            
-            if YOLO_AVAILABLE:
-                try:
-                    self.yolo_model = YOLO('yolov8n.pt')
-                    logger.info('YOLO模型加载成功')
-                except Exception as e:
-                    logger.error(f'YOLO加载失败: {str(e)}')
-                    self.yolo_model = None
-            else:
-                logger.info('YOLO不可用，仅使用SVM检测')
-                
+            img_tensor = self.transform(image).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                features = self.model(img_tensor)
+            return features.cpu().numpy().flatten()
         except Exception as e:
-            logger.error(f'初始化失败: {str(e)}')
-    
-    def _detect_skin(self, image):
-        """检测肤色区域，返回肤色掩码（YCbCr+HSV双模式）"""
+            logger.error(f'Feature extraction failed: {str(e)}')
+            return np.zeros(self.feature_dim)
+
+
+class SkinDetector:
+    @staticmethod
+    def detect(image):
         ycbcr = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
-        lower_skin = np.array([0, 133, 77], dtype=np.uint8)
-        upper_skin = np.array([255, 173, 127], dtype=np.uint8)
-        skin_mask_ycbcr = cv2.inRange(ycbcr, lower_skin, upper_skin)
-        
+        mask_ycbcr = cv2.inRange(ycbcr, Config.SKIN_LOWER_YCBCR, Config.SKIN_UPPER_YCBCR)
+
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower_hsv = np.array([0, 20, 40], dtype=np.uint8)
-        upper_hsv = np.array([25, 255, 255], dtype=np.uint8)
-        skin_mask_hsv = cv2.inRange(hsv, lower_hsv, upper_hsv)
-        
-        combined_mask = cv2.bitwise_or(skin_mask_ycbcr, skin_mask_hsv)
-        
-        return combined_mask
-    
-    def _detect_faces(self, image):
-        """检测人脸区域（使用AdaBoost）"""
-        if self.face_cascade is None:
-            return []
-        
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(
-            gray, 
-            scaleFactor=1.1, 
-            minNeighbors=5, 
-            minSize=(30, 30)
-        )
-        return faces
-    
-    def _remove_face_regions(self, skin_mask, faces):
-        """从肤色掩码中去除人脸区域"""
-        for (x, y, w, h) in faces:
-            skin_mask[y:y+h, x:x+w] = 0
-        return skin_mask
-    
-    def _texture_validation(self, image, skin_mask):
-        """通过纹理信息验证肤色区域，排除粗糙区域"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-        
-        skin_edge_sum = np.sum(edge_magnitude[skin_mask > 0])
-        skin_pixels = np.sum(skin_mask > 0)
-        
-        if skin_pixels > 0:
-            avg_edge = skin_edge_sum / skin_pixels
-            if avg_edge > 15:
-                kernel = np.ones((3, 3), np.uint8)
-                skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        
-        return skin_mask
-    
-    def _morphological_processing(self, skin_mask):
-        """形态学处理：排除小块区域，填补孔洞"""
+        mask_hsv = cv2.inRange(hsv, Config.SKIN_LOWER_HSV, Config.SKIN_UPPER_HSV)
+
+        return cv2.bitwise_or(mask_ycbcr, mask_hsv)
+
+    @staticmethod
+    def clean_mask(mask, image):
         kernel = np.ones((5, 5), np.uint8)
-        
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, kernel, iterations=2)
-        skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(skin_mask, connectivity=8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         min_area = 500
-        
         for i in range(1, num_labels):
             if stats[i, cv2.CC_STAT_AREA] < min_area:
-                skin_mask[labels == i] = 0
-        
-        return skin_mask
-    
-    def _extract_26d_features(self, image, skin_mask):
-        """提取26维特征向量（基于论文）"""
-        features = []
+                mask[labels == i] = 0
+
+        return mask
+
+    @staticmethod
+    def remove_faces(mask, image):
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+        for (x, y, w, h) in faces:
+            mask[y:y+h, x:x+w] = 0
+
+        return mask, len(faces)
+
+
+class BloodDetector:
+    @staticmethod
+    def detect(image):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        mask1 = cv2.inRange(hsv, Config.BLOOD_LOWER_HSV1, Config.BLOOD_UPPER_HSV1)
+        mask2 = cv2.inRange(hsv, Config.BLOOD_LOWER_HSV2, Config.BLOOD_UPPER_HSV2)
+        blood_mask = cv2.bitwise_or(mask1, mask2)
+
+        kernel = np.ones((5, 5), np.uint8)
+        blood_mask = cv2.morphologyEx(blood_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        blood_mask = cv2.morphologyEx(blood_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
         total_pixels = image.shape[0] * image.shape[1]
-        skin_pixels = np.sum(skin_mask > 0)
-        
-        if skin_pixels == 0:
-            return [0.0] * 26
-        
-        skin_ratio = skin_pixels / total_pixels
-        features.append(skin_ratio)
-        
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(skin_mask, connectivity=8)
-        
-        if num_labels > 1:
-            max_area = np.max(stats[1:, cv2.CC_STAT_AREA])
-            features.append(max_area / total_pixels)
-            features.append(max_area / skin_pixels)
-            features.append(min(num_labels - 1, 50) / 50.0)
-        else:
-            features.extend([0.0, 0.0, 0.0])
-        
-        if num_labels > 1:
-            max_label = np.argmax(stats[1:, cv2.CC_STAT_AREA]) + 1
-            max_region = (labels == max_label).astype(np.uint8) * 255
-            
-            contours, _ = cv2.findContours(max_region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        blood_pixels = np.sum(blood_mask > 0)
+        blood_ratio = blood_pixels / total_pixels if total_pixels > 0 else 0
+
+        is_blood = False
+        fractal_dim = 0.0
+
+        if blood_pixels > 500:
+            contours, _ = cv2.findContours(blood_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if contours:
-                cnt = contours[0]
+                largest = max(contours, key=cv2.contourArea)
+                fractal_dim = BloodDetector._fractal_dimension(largest)
+                contour_area = cv2.contourArea(largest)
                 
-                if len(cnt) >= 5:
-                    ellipse = cv2.fitEllipse(cnt)
-                    major_axis = max(ellipse[1][0], ellipse[1][1])
-                    minor_axis = min(ellipse[1][0], ellipse[1][1])
-                    eccentricity = minor_axis / (major_axis + 1e-5)
-                else:
-                    eccentricity = 1.0
-                features.append(eccentricity)
+                avg_saturation = np.mean(hsv[blood_mask > 0, 1])
+                avg_value = np.mean(hsv[blood_mask > 0, 2])
                 
-                perimeter = cv2.arcLength(cnt, True)
-                area = cv2.contourArea(cnt)
-                compactness = perimeter / (np.sqrt(area) + 1e-5)
-                features.append(min(compactness / 50.0, 1.0))
-                
-                x, y, w, h = cv2.boundingRect(cnt)
-                rect_area = w * h
-                area_ratio = area / rect_area
-                features.append(area_ratio)
-                
-                inner_mask = np.zeros_like(max_region)
-                cv2.drawContours(inner_mask, contours, 0, 255, -1)
-                hole_area = np.sum(max_region > 0) - np.sum(inner_mask > 0)
-                hole_ratio = hole_area / (np.sum(max_region > 0) + 1e-5)
-                features.append(hole_ratio)
-            else:
-                features.extend([1.0, 0.0, 0.0, 0.0])
-        else:
-            features.extend([1.0, 0.0, 0.0, 0.0])
-        
-        moments = cv2.moments(skin_mask)
-        hu_moments = cv2.HuMoments(moments)
-        hu_moments = -np.sign(hu_moments) * np.log10(np.abs(hu_moments) + 1e-10)
-        features.extend(hu_moments.flatten().tolist())
-        
-        b, g, r = cv2.split(image)
-        skin_b = b[skin_mask > 0]
-        skin_g = g[skin_mask > 0]
-        skin_r = r[skin_mask > 0]
-        
-        for channel in [skin_r, skin_g, skin_b]:
-            if len(channel) > 0:
-                mean = np.mean(channel) / 255.0
-                var = np.var(channel) / (255.0 ** 2)
-                std = np.std(channel) / 255.0 if len(channel) > 1 else 0.0
-                features.extend([mean, var, std])
-            else:
-                features.extend([0.0, 0.0, 0.0])
-        
-        return features[:26]
-    
-    def _detect_periodic_motion(self, frames, fps=30):
-        """检测镜头内的周期运动模式"""
-        if len(frames) < 10:
-            return 0.0
-        
-        motion_scores = []
-        frame_interval = max(2, fps // 15)
-        
-        for i in range(len(frames) - frame_interval):
-            frame1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-            frame2 = cv2.cvtColor(frames[i + frame_interval], cv2.COLOR_BGR2GRAY)
-            
-            frame1 = cv2.resize(frame1, (128, 128))
-            frame2 = cv2.resize(frame2, (128, 128))
-            
-            diff = cv2.absdiff(frame1, frame2)
-            motion_energy = np.sum(diff) / (128 * 128 * 255)
-            motion_scores.append(motion_energy)
-        
-        if not motion_scores:
-            return 0.0
-        
-        motion_std = np.std(motion_scores)
-        motion_mean = np.mean(motion_scores)
-        
-        if motion_mean < 0.01:
-            return 0.0
-        
-        return min(motion_std / motion_mean, 2.0) / 2.0
-    
-    def _yolo_detection(self, image):
-        """YOLO目标检测 - 仅检测危险物体，不包括人脸"""
-        if not YOLO_AVAILABLE or self.yolo_model is None:
-            return {'objects': [], 'risk_score': 0}
-        
+                is_blood = (blood_ratio > 0.05 and 
+                           contour_area > 1000 and 
+                           fractal_dim > 1.4 and
+                           avg_saturation > 150 and
+                           avg_value > 100)
+
+        return {
+            'blood_ratio': blood_ratio,
+            'fractal_dimension': fractal_dim,
+            'is_blood': is_blood,
+            'mask': blood_mask
+        }
+
+    @staticmethod
+    def _fractal_dimension(contour):
         try:
-            detections = self.yolo_model(image, verbose=False)
-            detected_objects = []
+            perimeter = cv2.arcLength(contour, True)
+            area = cv2.contourArea(contour)
+            if area <= 0 or perimeter <= 0:
+                return 0.0
+
+            box = cv2.minAreaRect(contour)
+            max_dim = max(box[1])
+            if max_dim < 10:
+                return 1.0
+
+            dimension = (4 * np.pi * area) / (perimeter ** 2 + 1e-10)
+            dimension = 2 - np.log(dimension) / np.log(max_dim / 10)
+            return max(1.0, min(2.0, dimension))
+        except Exception:
+            return 0.0
+
+
+class YOLODetector:
+    def __init__(self):
+        self.model = None
+        self._load_model()
+
+    def _load_model(self):
+        try:
+            from ultralytics import YOLO
+            for path in Config.YOLO_LOCAL_PATHS:
+                if os.path.exists(path):
+                    self.model = YOLO(path)
+                    logger.info(f'YOLO loaded: {path}')
+                    return
+
+            self.model = YOLO('yolov8n.pt')
+            logger.info('YOLO loaded from network')
+        except Exception as e:
+            logger.warning(f'YOLO not available: {str(e)}')
+
+    def detect(self, image):
+        if self.model is None:
+            return {'objects': [], 'risk_score': 0}
+
+        try:
+            detections = self.model(image, verbose=False)
+            objects = []
             risk_score = 0
-            
-            sensitive_classes = {
-                'knife': 35, 'gun': 45, 
-                'fire': 25, 'scissors': 30, 'axe': 40, 'hammer': 30,
-                'bottle': 15, 'cup': 10, 'fork': 15
-            }
-            
+
             for det in detections:
                 for box in det.boxes:
                     cls_name = det.names[int(box.cls[0])]
                     confidence = float(box.conf[0])
-                    
                     if confidence > 0.5:
-                        detected_objects.append({
-                            'name': cls_name,
-                            'confidence': confidence
-                        })
-                        
-                        if cls_name in sensitive_classes:
-                            risk_score += sensitive_classes[cls_name] * 0.5
-            
-            return {
-                'objects': detected_objects,
-                'risk_score': min(risk_score, 30)
-            }
+                        objects.append({'name': cls_name, 'confidence': confidence})
+                        if cls_name in Config.SENSITIVE_CLASSES:
+                            risk_score += Config.SENSITIVE_CLASSES[cls_name] * 0.5
+
+            return {'objects': objects, 'risk_score': min(risk_score, 30)}
         except Exception as e:
-            logger.error(f'YOLO检测失败: {str(e)}')
+            logger.error(f'YOLO detection failed: {str(e)}')
             return {'objects': [], 'risk_score': 0}
-    
-    def analyze_frame(self, image):
-        """分析单帧图像 - SVM为主，YOLO为辅"""
-        reasoning = []
-        
-        skin_mask = self._detect_skin(image)
-        faces = self._detect_faces(image)
-        skin_mask = self._remove_face_regions(skin_mask, faces)
-        skin_mask = self._texture_validation(image, skin_mask)
-        skin_mask = self._morphological_processing(skin_mask)
-        
-        features = self._extract_26d_features(image, skin_mask)
-        skin_ratio = features[0]
-        
-        reasoning.append(f'肤色占比: {skin_ratio:.2%}')
-        reasoning.append(f'人脸数量: {len(faces)}')
-        
-        svm_score = self._classify_features(features) * 90
-        reasoning.append(f'SVM评分: {svm_score:.1f}')
-        
-        yolo_result = self._yolo_detection(image)
-        yolo_score = yolo_result['risk_score']
-        
-        if yolo_result['objects']:
-            reasoning.append(f'YOLO检测到: {[obj["name"] for obj in yolo_result["objects"]]}')
-        
-        final_score = svm_score + yolo_score
-        final_score = min(final_score, 100)
-        
-        result_class = 'normal'
-        if final_score > 70:
-            result_class = 'violation'
-            reasoning.append('判定为违规')
-        elif final_score > 40:
-            result_class = 'suspicious'
-            reasoning.append('判定为可疑')
-        
-        return {
-            'risk_score': final_score,
-            'class': result_class,
-            'reasoning': reasoning,
-            'objects': yolo_result['objects'],
-            'skin_ratio': skin_ratio,
-            'svm_score': svm_score,
-            'yolo_score': yolo_score
-        }
-    
-    def _classify_features(self, features):
-        """使用SVM或规则进行分类"""
+
+
+class VideoContentAnalyzer:
+    def __init__(self):
+        self.feature_extractor = FeatureExtractor()
+        self.skin_detector = SkinDetector()
+        self.blood_detector = BloodDetector()
+        self.yolo_detector = YOLODetector()
+        self.high_acc_classifier = None
+        self.svm_classifier = None
+        self._load_high_acc_classifier()
+
+    def _load_high_acc_classifier(self):
         try:
-            if self.svm_classifier is not None:
-                features_scaled = self.scaler.fit_transform([features])
-                prob = self.svm_classifier.predict_proba(features_scaled)[0]
-                return prob[1] if len(prob) > 1 else 0.5
-        except:
-            pass
+            from .nsfw_vit import NSFWViTClassifier
+            self.high_acc_classifier = NSFWViTClassifier()
+            logger.info('ViT-Large NSFW classifier loaded')
+        except Exception as e:
+            logger.warning(f'ViT classifier not available: {str(e)}')
+            try:
+                from .nsfw_high_acc import NSFWHighAccuracyClassifier
+                self.high_acc_classifier = NSFWHighAccuracyClassifier(model_type='resnet101')
+                logger.info('Fallback: ResNet101 classifier loaded')
+            except Exception as e2:
+                logger.warning(f'High accuracy classifier not available: {str(e2)}')
+
+    def _high_acc_score(self, image):
+        if self.high_acc_classifier is None:
+            return 0
+
+        try:
+            result = self.high_acc_classifier.predict_cv2(image)
+            if result.get('is_nsfw', False):
+                confidence = result.get('confidence', 0)
+                if confidence < 0.8:
+                    return 0
+                elif confidence < 0.9:
+                    return confidence * 80
+                return confidence * 95
+            return 0
+        except Exception:
+            return 0
+
+    def analyze_frame(self, image):
+        result = {
+            'risk_score': 0,
+            'class': DetectionResult.NORMAL.value,
+            'reasoning': [],
+            'objects': [],
+            'faces': 0,
+            'skin_ratio': 0,
+            'resnet_score': 0,
+            'yolo_score': 0,
+            'blood_score': 0,
+            'blood_ratio': 0,
+            'has_breast': False,
+            'breast_ratio': 0,
+            'human_ratio': 0
+        }
+
+        skin_mask = self.skin_detector.detect(image)
+        skin_mask, face_count = self.skin_detector.remove_faces(skin_mask, image)
+        skin_mask = self.skin_detector.clean_mask(skin_mask, image)
+
+        total_pixels = image.shape[0] * image.shape[1]
+        skin_pixels = np.sum(skin_mask > 0)
+        skin_ratio = skin_pixels / total_pixels if total_pixels > 0 else 0
+
+        breast_result = self._detect_breast(image, skin_mask)
+
+        yolo_result = self.yolo_detector.detect(image)
+        blood_result = self.blood_detector.detect(image)
+        high_acc_score = self._high_acc_score(image)
+
+        features = self._extract_features(image, skin_mask)
+        features.extend([float(breast_result['has_breast']), breast_result['breast_ratio'], skin_ratio])
+
+        svm_score = self._classify_features(features) * 90
+        blood_score = self._calculate_blood_score(blood_result)
+
+        breast_bonus = 15 if breast_result['has_breast'] and skin_ratio > Config.THRESHOLD_SKIN_LOW else 0
         
+        if self.high_acc_classifier is not None:
+            if blood_score > 0:
+                final_score = high_acc_score * 0.35 + yolo_result['risk_score'] * 0.1 + blood_score * 0.3 + breast_bonus + svm_score * 0.15
+            else:
+                final_score = high_acc_score * 0.5 + yolo_result['risk_score'] * 0.15 + blood_score * 0.1 + breast_bonus + svm_score * 0.15
+        else:
+            final_score = svm_score * 0.4 + yolo_result['risk_score'] * 0.25 + blood_score * 0.2 + breast_bonus
+        final_score = min(final_score, 100)
+
+        result.update({
+            'risk_score': final_score,
+            'class': self._determine_class(final_score),
+            'objects': yolo_result['objects'],
+            'faces': face_count,
+            'skin_ratio': skin_ratio,
+            'resnet_score': high_acc_score,
+            'yolo_score': yolo_result['risk_score'],
+            'blood_score': blood_score,
+            'blood_ratio': blood_result['blood_ratio'],
+            'is_blood': blood_result['is_blood'],
+            'has_breast': breast_result['has_breast'],
+            'breast_ratio': breast_result['breast_ratio'],
+            'human_ratio': skin_ratio,
+            'vit_score': high_acc_score
+        })
+
+        return result
+
+    def _detect_breast(self, image, skin_mask):
+        b, g, r = cv2.split(image)
+        r_minus_g = cv2.subtract(r, g)
+        r_minus_b = cv2.subtract(r, b)
+        combined = cv2.addWeighted(r_minus_g, 0.5, r_minus_b, 0.5, 0)
+        _, breast_mask = cv2.threshold(combined, 20, 255, cv2.THRESH_BINARY)
+        breast_mask = cv2.bitwise_and(breast_mask, breast_mask, mask=skin_mask)
+
+        kernel = np.ones((3, 3), np.uint8)
+        breast_mask = cv2.morphologyEx(breast_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        breast_mask = cv2.morphologyEx(breast_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(breast_mask, connectivity=8)
+        valid = sum(1 for i in range(1, num_labels) if 100 < stats[i, cv2.CC_STAT_AREA] < 5000)
+
+        breast_pixels = np.sum(breast_mask > 0)
+        skin_pixels = np.sum(skin_mask > 0)
+        breast_ratio = breast_pixels / max(skin_pixels, 1)
+        has_breast = breast_ratio > 0.02 and valid >= 1
+
+        return {'has_breast': has_breast, 'breast_ratio': breast_ratio}
+
+    def _extract_features(self, image, skin_mask):
+        features = []
+        total_pixels = image.shape[0] * image.shape[1]
+        skin_pixels = np.sum(skin_mask > 0)
+
+        if skin_pixels == 0:
+            return [0.0] * 26
+
+        features.append(skin_pixels / total_pixels)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(skin_mask, connectivity=8)
+        if num_labels > 1:
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            features.append(np.max(areas) / total_pixels)
+            features.append(np.max(areas) / skin_pixels)
+            features.append(min(num_labels - 1, 50) / 50.0)
+        else:
+            features.extend([0.0, 0.0, 0.0])
+
+        moments = cv2.moments(skin_mask)
+        hu_moments = cv2.HuMoments(moments)
+        hu_moments = -np.sign(hu_moments) * np.log10(np.abs(hu_moments) + 1e-10)
+        features.extend(hu_moments.flatten().tolist())
+
+        b, g, r = cv2.split(image)
+        for channel in [r[skin_mask > 0], g[skin_mask > 0], b[skin_mask > 0]]:
+            if len(channel) > 0:
+                features.extend([np.mean(channel) / 255.0, np.var(channel) / (255.0 ** 2), np.std(channel) / 255.0])
+            else:
+                features.extend([0.0, 0.0, 0.0])
+
+        return features
+
+    def _classify_features(self, features):
+        if hasattr(self, 'svm_classifier') and self.svm_classifier is not None:
+            try:
+                import numpy as np
+                features_array = np.array(features).reshape(1, -1)
+                return self.svm_classifier.predict_proba(features_array)[0][1]
+            except Exception:
+                return self._rule_based_score(features)
         return self._rule_based_score(features)
-    
+
     def _rule_based_score(self, features):
-        """基于规则的评分 - 裸体检测"""
-        score = 0.0
+        if len(features) == 0:
+            return 0.0
+
         skin_ratio = features[0]
-        
-        if skin_ratio > 0.35:
-            score += 0.55
-            if skin_ratio > 0.45:
+        score = 0.0
+
+        if skin_ratio > 0.5:
+            score += 0.45
+            if skin_ratio > 0.6:
                 score += 0.25
-            if skin_ratio > 0.55:
-                score += 0.15
-        elif skin_ratio > 0.2:
-            score += 0.35
-        elif skin_ratio > 0.12:
-            score += 0.15
-        
-        if skin_ratio > 0.15:
-            compactness = features[5]
-            if compactness < 0.4:
+            if skin_ratio > 0.7:
                 score += 0.2
-            
-            eccentricity = features[4]
-            if eccentricity > 0.6:
-                score += 0.15
-        
+        elif skin_ratio > 0.35:
+            score += 0.3
+        elif skin_ratio > 0.25:
+            score += 0.15
+        elif skin_ratio > 0.15:
+            score += 0.08
+        elif skin_ratio > 0.08:
+            score += 0.05
+
+        if len(features) >= 26:
+            has_breast = bool(features[-3])
+            breast_ratio = features[-2]
+            if has_breast:
+                score += 0.2
+                if breast_ratio > 0.02:
+                    score += 0.1
+
         return min(score, 1.0)
-    
+
+    def _calculate_blood_score(self, blood_result):
+        if not blood_result.get('is_blood', False):
+            return 0.0
+
+        blood_ratio = blood_result.get('blood_ratio', 0.0)
+        fractal_dim = blood_result.get('fractal_dimension', 0.0)
+
+        base_score = min(blood_ratio * 400, 60)
+        if fractal_dim > 1.4:
+            base_score *= 1.6
+
+        return min(base_score, 80)
+
+    def _determine_class(self, score):
+        if score > Config.THRESHOLD_VIOLATION:
+            return DetectionResult.VIOLATION.value
+        elif score > Config.THRESHOLD_SUSPICIOUS:
+            return DetectionResult.SUSPICIOUS.value
+        return DetectionResult.NORMAL.value
+
     def analyze_shot(self, frames, fps=30):
-        """分析单个镜头（基于论文的完整流程）"""
         if not frames or len(frames) < 3:
-            return {
-                'risk_score': 0,
-                'class': 'normal',
-                'reasoning': ['帧数量不足']
-            }
-        
-        reasoning = []
-        frame_results = []
-        sensitive_count = 0
-        
-        for frame in frames:
-            result = self.analyze_frame(frame)
-            frame_results.append(result)
-            if result['class'] != 'normal':
-                sensitive_count += 1
-        
+            return {'risk_score': 0, 'class': 'normal', 'reasoning': ['帧数量不足']}
+
+        frame_results = [self.analyze_frame(frame) for frame in frames]
+        sensitive_count = sum(1 for r in frame_results if r['class'] != 'normal')
+
         avg_score = np.mean([r['risk_score'] for r in frame_results])
         max_score = np.max([r['risk_score'] for r in frame_results])
-        
         sensitive_ratio = sensitive_count / len(frames)
-        periodicity = self._detect_periodic_motion(frames, fps)
-        
-        reasoning.append(f'分析帧数: {len(frames)}')
-        reasoning.append(f'平均帧评分: {avg_score:.1f}')
-        reasoning.append(f'最高帧评分: {max_score:.1f}')
-        reasoning.append(f'敏感帧比例: {sensitive_ratio:.1%}')
-        reasoning.append(f'周期性指数: {periodicity:.2f}')
-        
+
         final_score = avg_score * 0.5 + max_score * 0.4
-        
+
         if sensitive_ratio > 0.15:
-            extra = (sensitive_ratio - 0.15) * 80
-            final_score += min(extra, 35)
-            reasoning.append(f'敏感帧比例{sensitive_ratio:.1%}，加{min(extra, 35):.0f}分')
-        
-        if periodicity > 0.2:
-            if avg_score > 10:
-                extra = periodicity * 50
-                final_score += min(extra, 40)
-                reasoning.append(f'检测到周期性运动模式，加{min(extra, 40):.0f}分')
-            else:
-                extra = periodicity * 30
-                final_score += min(extra, 25)
-                reasoning.append(f'检测到周期性运动，加{min(extra, 25):.0f}分')
-        
+            final_score += min((sensitive_ratio - 0.15) * 80, 35)
+
         final_score = min(final_score, 100)
-        
+
         result_class = 'normal'
         if final_score > 70:
             result_class = 'violation'
         elif final_score > 40:
             result_class = 'suspicious'
-        
+
         return {
             'risk_score': final_score,
             'class': result_class,
-            'reasoning': reasoning,
-            'periodicity': periodicity,
+            'reasoning': [
+                f'分析帧数: {len(frames)}',
+                f'平均评分: {avg_score:.1f}',
+                f'敏感帧比例: {sensitive_ratio:.1%}'
+            ],
+            'periodicity': 0,
             'sensitive_ratio': sensitive_ratio
         }
-    
+
     def classify_images(self, image_paths):
-        """批量分类图像"""
-        all_results = []
-        
-        for image_path in image_paths:
+        results = []
+        for path in image_paths:
             try:
-                image = self._read_image(image_path)
+                image_data = np.fromfile(path, dtype=np.uint8)
+                image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
                 if image is None:
-                    result = {
-                        'risk_score': 0,
-                        'class': 'normal',
-                        'reasoning': ['无法读取图像'],
-                        'imagePath': image_path
-                    }
+                    result = {'risk_score': 0, 'class': 'normal', 'reasoning': ['无法读取图像']}
                 else:
                     result = self.analyze_frame(image)
-                    result['imagePath'] = image_path
-                
-                all_results.append(result)
+                result['imagePath'] = path
+                results.append(result)
             except Exception as e:
-                logger.error(f'分析图像失败 {image_path}: {str(e)}')
-                all_results.append({
-                    'risk_score': 0,
-                    'class': 'normal',
-                    'reasoning': [f'分析失败: {str(e)}'],
-                    'imagePath': image_path
-                })
-        
-        return all_results
-    
-    def _read_image(self, image_path):
-        """读取图像（支持中文路径）"""
-        try:
-            image_data = np.fromfile(image_path, dtype=np.uint8)
-            image = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-            return image
-        except Exception as e:
-            logger.error(f'读取图像失败 {image_path}: {str(e)}')
-            return None
+                logger.error(f'分析失败 {path}: {str(e)}')
+                results.append({'risk_score': 0, 'class': 'normal', 'reasoning': [f'分析失败: {str(e)}'], 'imagePath': path})
+        return results

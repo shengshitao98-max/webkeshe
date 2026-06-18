@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Row, Col, Card, Statistic, Table, Tag, Button, Modal, Form, Input, message, Select, Collapse, Space, Tabs, Divider, Switch, InputNumber, Alert } from 'antd';
-import { UploadOutlined, CheckOutlined, CloseOutlined, WarningOutlined, InfoCircleOutlined, BarChartOutlined, FileTextOutlined, SettingOutlined, LockOutlined } from '@ant-design/icons';
+import { UploadOutlined, CheckOutlined, CloseOutlined, WarningOutlined, InfoCircleOutlined, BarChartOutlined, FileTextOutlined, SettingOutlined, LockOutlined, PieChartOutlined } from '@ant-design/icons';
 import { videoAPI, reviewAPI } from '../services/api';
 import { useAuthStore } from '../stores';
 import { colorMap, riskLevelMap, categoryMap } from '../styles/constants';
@@ -369,12 +369,18 @@ const Dashboard = () => {
       {
         title: '本地评分',
         key: 'localScore',
-        render: (_, record) => record.auditResult?.localRiskScore || '-',
+        render: (_, record) => {
+          const score = record.auditResult?.localRiskScore;
+          return score !== null && score !== undefined ? score : '-';
+        },
       },
       {
         title: '文本评分',
         key: 'textScore',
-        render: (_, record) => record.auditResult?.textRiskScore || '-',
+        render: (_, record) => {
+          const score = record.auditResult?.textRiskScore;
+          return score !== null && score !== undefined ? score : '-';
+        },
       },
       {
         title: '综合评分',
@@ -736,82 +742,43 @@ const Dashboard = () => {
             {isAdmin && (
               <Card title="AI 判断依据" variant="outlined" className="bg-gradient-to-r from-blue-50 to-indigo-50">
                 <Collapse
-                  defaultActiveKey={['1', '2']}
+                  defaultActiveKey={['0', '2']}
                   ghost
                   items={[
                     {
-                      key: '1',
-                      label: <span className="flex items-center gap-2"><BarChartOutlined /> 图像分析判定</span>,
+                      key: '0',
+                      label: <span className="flex items-center gap-2"><PieChartOutlined /> 整体数据分析</span>,
                       children: (
                         <div className="space-y-4">
                           <div className="bg-white rounded-lg p-4">
-                            <p className="text-sm font-medium text-gray-700 mb-3">关键帧检测指标：</p>
-                            {selectedReview.imageClassifications?.length > 0 && (
-                              <div className="space-y-4">
-                                {selectedReview.imageClassifications.slice(0, 3).map((frame, idx) => (
-                                  <div key={idx} className="border-t pt-3">
-                                    <p className="text-xs text-gray-500 mb-2">第 {idx + 1} 帧</p>
-                                    <div className="grid grid-cols-2 gap-4">
-                                      {renderMetricBar('皮肤占比', frame.metrics?.skinPercentage || 0, 100, 30, 45)}
-                                  {renderMetricBar('红色区域', frame.metrics?.bloodPercentage || 0, 100, 5, 15)}
-                                </div>
-                                <div className="grid grid-cols-2 gap-4 mt-2">
-                                  {renderMetricBar('模糊度', frame.metrics?.blurScore || 0, 100, 50, 70)}
-                                  {renderMetricBar('色彩饱和度', frame.metrics?.colorSaturation || 0, 100, 85, 95)}
-                                </div>
-                                <div className="grid grid-cols-2 gap-4 mt-2">
-                                  <div className="space-y-1">
-                                    <div className="flex justify-between text-sm">
-                                      <span className="text-gray-600">边缘密度</span>
-                                      <span className="font-medium">{(frame.metrics?.edgeDensity || 0).toFixed(3)}</span>
+                            <p className="text-sm font-medium text-gray-700 mb-3">整体检测指标汇总：</p>
+                            <div className="grid grid-cols-2 gap-4">
+                              {renderMetricBar('图像风险', selectedReview.imageRiskScore || 0, 100, 30, 70)}
+                              {renderMetricBar('文本风险', selectedReview.textRiskScore || 0, 100, 30, 70)}
+                            </div>
+                            <div className="grid grid-cols-2 gap-4 mt-4">
+                              {renderMetricBar('综合风险', selectedReview.overallRiskScore || 0, 100, 30, 70)}
+                              {renderMetricBar('本地评分', selectedReview.localRiskScore || 0, 100, 30, 70)}
+                            </div>
+                            
+                            <div className="mt-4 pt-4 border-t">
+                              <p className="text-xs text-gray-500 mb-2">判定理由：</p>
+                              {selectedReview.imageClassifications?.length > 0 && selectedReview.imageClassifications[0]?.reasoning && (
+                                <div className="space-y-1">
+                                  {selectedReview.imageClassifications[0].reasoning.map((reason, idx) => (
+                                    <div key={idx} className="flex items-start gap-2 text-sm">
+                                      <InfoCircleOutlined className="mt-0.5 text-blue-500" />
+                                      <span className="text-gray-600">{reason}</span>
                                     </div>
-                                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                      <div 
-                                        className={`h-full ${(frame.metrics?.edgeDensity || 0) > 0.15 ? 'bg-red-500' : 'bg-green-500'}`}
-                                        style={{ width: `${(frame.metrics?.edgeDensity || 0) * 100}%` }}
-                                      />
-                                    </div>
-                                  </div>
-                                  <div className="space-y-1">
-                                    <div className="flex justify-between text-sm">
-                                      <span className="text-gray-600">画面混乱度</span>
-                                      <span className="font-medium">{(frame.metrics?.chaosScore || 0).toFixed(2)}</span>
-                                    </div>
-                                    <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                      <div 
-                                        className={`h-full ${(frame.metrics?.chaosScore || 0) > 0.6 ? 'bg-red-500' : (frame.metrics?.chaosScore || 0) > 0.4 ? 'bg-yellow-500' : 'bg-green-500'}`}
-                                        style={{ width: `${(frame.metrics?.chaosScore || 0) * 100}%` }}
-                                      />
-                                    </div>
-                                  </div>
+                                  ))}
                                 </div>
-                                <div className="flex justify-between text-sm mt-2">
-                                  <span className="text-gray-600">人脸数量</span>
-                                  <span className="font-medium">{frame.metrics?.faceCount || 0}</span>
-                                </div>
-                                <div className="flex justify-between text-sm mt-1">
-                                  <span className="text-gray-600">帧分类</span>
-                                  <Tag color={frame.class === 'normal' ? 'green' : frame.class === 'suggestive' ? 'orange' : frame.class === 'violent' ? 'purple' : 'red'}>
-                                    {frame.class === 'normal' ? '正常' : frame.class === 'suggestive' ? '暗示性' : frame.class === 'violent' ? '暴力' : '色情'}
-                                  </Tag>
-                                </div>
-                                    {frame.reasoning && frame.reasoning.length > 0 && (
-                                      <div className="mt-2 space-y-1">
-                                        <p className="text-xs text-gray-500">判定理由：</p>
-                                        {frame.reasoning.map((reason, rIdx) => renderReasoningItem(reason, rIdx))}
-                                      </div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {selectedReview.imageClassifications?.length === 0 && (
-                              <p className="text-gray-500 text-sm">暂无图像分析数据</p>
-                            )}
+                              )}
+                            </div>
                           </div>
                         </div>
                       ),
                     },
+                    
                     {
                       key: '2',
                       label: <span className="flex items-center gap-2"><InfoCircleOutlined /> 文本分析判定</span>,
